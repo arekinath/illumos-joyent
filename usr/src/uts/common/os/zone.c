@@ -1306,6 +1306,9 @@ zone_free_datasets(zone_t *zone)
 		next = list_next(&zone->zone_datasets, t);
 		list_remove(&zone->zone_datasets, t);
 		kmem_free(t->zd_dataset, strlen(t->zd_dataset) + 1);
+		if (t->zd_alias != NULL) {
+			kmem_free(t->zd_alias, strlen(t->zd_alias) + 1);
+		}
 		kmem_free(t, sizeof (*t));
 	}
 	list_destroy(&zone->zone_datasets);
@@ -4727,15 +4730,67 @@ zone_set_label(zone_t *zone, const bslabel_t *lab, uint32_t doi)
 }
 
 /*
- * Parses a comma-separated list of ZFS datasets into a per-zone dictionary.
+ * Check for a valid ZFS dataset name.  This function mirrors the rules
+ * for ZFS dataset names checked by "dataset_namecheck()".
+ */
+
+static boolean_t
+parse_zfs_valid_char(char c)
+{
+	return ((c >= 'a' && c <= 'z') ||
+	    (c >= 'A' && c <= 'Z') ||
+	    (c >= '0' && c <= '9') ||
+	    c == '-' || c == '_' || c == '.' || c == ':' || c == ' ');
+}
+
+static void
+parse_zfs_insert(zone_t *zone, const char *dataset, size_t dataset_len,
+    const char *alias, size_t alias_len)
+{
+	zone_dataset_t *zd = kmem_zalloc(sizeof (zone_dataset_t), KM_SLEEP);
+
+	VERIFY(dataset != NULL);
+	VERIFY(dataset_len > 0);
+	zd->zd_dataset = kmem_alloc(dataset_len + 1, KM_SLEEP);
+	bcopy(dataset, zd->zd_dataset, dataset_len);
+	zd->zd_dataset[dataset_len] = '\0';
+
+	if (alias != NULL) {
+		VERIFY(alias_len > 0);
+		zd->zd_alias = kmem_alloc(alias_len + 1, KM_SLEEP);
+		bcopy(alias, zd->zd_alias, alias_len);
+		zd->zd_alias[alias_len] = '\0';
+	} else {
+		VERIFY(alias_len == 0);
+	}
+
+	list_insert_head(&zone->zone_datasets, zd);
+}
+
+/*
+ * Parses a list of ZFS datasets into a per-zone dictionary.  Each dataset
+ * in the list is separated by a comma.  If a dataset should be known by
+ * an alias from within the zone, that alias is specified after a pipe.
+ * The alias must be a valid dataset name with exactly one component.
+ * A trailing comma at the end of the list is allowed.
+ *
+ * For example:
+ *
+ *	Without any aliases:	"one,two/a/b/c,three"
+ *	With an alias:		"long/dataset/name|tank,another,athird"
  */
 static int
 parse_zfs(zone_t *zone, caddr_t ubuf, size_t buflen)
 {
+	int ret = 0;
 	char *kbuf;
-	char *dataset, *next;
-	zone_dataset_t *zd;
-	size_t len;
+	enum parse_zfs_state {
+		PZS_REST,
+		PZS_DATASET,
+		PZS_ALIAS
+	} pzs = PZS_REST;
+	const char *dataset = NULL, *alias = NULL;
+	size_t dataset_len = 0, alias_len = 0;
 
 	if (ubuf == NULL || buflen == 0)
 		return (0);
@@ -4748,31 +4803,127 @@ parse_zfs(zone_t *zone, caddr_t ubuf, size_t buflen)
 		return (EFAULT);
 	}
 
-	dataset = next = kbuf;
-	for (;;) {
-		zd = kmem_alloc(sizeof (zone_dataset_t), KM_SLEEP);
+	for (size_t i = 0; i < buflen; i++) {
+		char c = kbuf[i];
 
-		next = strchr(dataset, ',');
+		switch (pzs) {
+		case PZS_REST:
+			if (c == '\0') {
+				goto out;
 
-		if (next == NULL)
-			len = strlen(dataset);
-		else
-			len = next - dataset;
+			} else if (parse_zfs_valid_char(c)) {
+				/*
+				 * This is the beginning of a valid dataset
+				 * name.
+				 */
+				dataset = &kbuf[i];
+				dataset_len = 1;
+				alias = NULL;
+				alias_len = 0;
+				pzs = PZS_DATASET;
 
-		zd->zd_dataset = kmem_alloc(len + 1, KM_SLEEP);
-		bcopy(dataset, zd->zd_dataset, len);
-		zd->zd_dataset[len] = '\0';
-
-		list_insert_head(&zone->zone_datasets, zd);
-
-		if (next == NULL)
+			} else if (c != ',') {
+				/*
+				 * A trailing comma is allowed.
+				 */
+				ret = EINVAL;
+				goto out;
+			}
 			break;
 
-		dataset = next + 1;
+		case PZS_DATASET:
+			if (c == '\0' || c == ',') {
+				/*
+				 * End of dataset name, without an alias.
+				 * Commit to dictionary.
+				 */
+				parse_zfs_insert(zone, dataset, dataset_len,
+				    alias, alias_len);
+
+				pzs = PZS_REST;
+				if (c == '\0') {
+					goto out;
+				}
+
+			} else if (c == '|') {
+				/*
+				 * The pipe separates this dataset name from
+				 * its alias name.
+				 */
+				pzs = PZS_ALIAS;
+
+			} else if (parse_zfs_valid_char(c) || c == '/') {
+				/*
+				 * The slash ('/') character is allowed within
+				 * a dataset name, but not an alias name,
+				 * so we mention it explicitly here.
+				 */
+				dataset_len++;
+
+			} else {
+				ret = EINVAL;
+				goto out;
+			}
+			break;
+
+		case PZS_ALIAS:
+			if (c == '\0' || c == ',') {
+				if (alias == NULL) {
+					/*
+					 * If there was an alias separator,
+					 * there must then be an alias string.
+					 */
+					ret = EINVAL;
+					goto out;
+				}
+
+				/*
+				 * End of dataset name with an alias.  Commit
+				 * to dictionary.
+				 */
+				parse_zfs_insert(zone, dataset, dataset_len,
+				    alias, alias_len);
+
+				pzs = PZS_REST;
+				if (c == '\0') {
+					goto out;
+				}
+
+			} else if (parse_zfs_valid_char(c)) {
+				if (alias == NULL) {
+					alias = &kbuf[i];
+					alias_len = 1;
+				} else {
+					alias_len++;
+				}
+
+			} else {
+				ret = EINVAL;
+				goto out;
+			}
+			break;
+
+		default:
+			panic("parse_zfs(): unexpected state");
+		}
+	}
+
+out:
+	if (ret == 0) {
+		if ((pzs == PZS_ALIAS && alias != NULL) ||
+		    pzs == PZS_DATASET) {
+			parse_zfs_insert(zone, dataset, dataset_len,
+			    alias, alias_len);
+		} else {
+			/*
+			 * The string ended unexpectedly.
+			 */
+			ret = EINVAL;
+		}
 	}
 
 	kmem_free(kbuf, buflen);
-	return (0);
+	return (ret);
 }
 
 /*
