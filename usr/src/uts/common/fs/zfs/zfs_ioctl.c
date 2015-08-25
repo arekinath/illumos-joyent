@@ -1579,6 +1579,94 @@ zfs_ioc_pool_export(zfs_cmd_t *zc)
 	return (error);
 }
 
+static boolean_t
+zfs_ioc_zone_ds_matches(const char *dataset, zone_dataset_t *zd)
+{
+	size_t len;
+
+	len = strlen(zd->zd_dataset);
+	if (strlen(dataset) >= len &&
+	    bcmp(dataset, zd->zd_dataset, len) == 0 &&
+	    (dataset[len] == '\0' || dataset[len] == '/' ||
+	    dataset[len] == '@')) {
+		return (B_TRUE);
+	}
+
+	len = strlen(dataset);
+	if (dataset[len - 1] == '/')
+		len--;	/* Ignore trailing slash */
+	if (len < strlen(zd->zd_dataset) &&
+	    bcmp(dataset, zd->zd_dataset, len) == 0 &&
+	    zd->zd_dataset[len] == '/') {
+		return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+static int
+zfs_ioc_pool_configs_alias(nvlist_t **configs)
+{
+	nvlist_t *all = *configs;
+	nvlist_t *temp = NULL;
+	nvpair_t *elem = NULL;
+	char *name;
+	char aname[MAXPATHLEN];
+	size_t len;
+	zone_dataset_t *zd;
+	boolean_t found;
+	int error = 0;
+	zone_t *zone = curzone;
+
+	*configs = NULL;
+	VERIFY(nvlist_alloc(configs, NV_UNIQUE_NAME, KM_SLEEP) == 0);
+
+	/*
+	 * For each pool, we want to create an entry in the final list,
+	 * and possibly rename it to reflect an alias. It's also possible
+	 * we will need to do both (for two delegated datasets under the
+	 * same pool, one aliased and one not).
+	 *
+	 * Since we made configs with NV_UNIQUE_NAME, re-adding the same
+	 * pool multiple times is not really a problem, so we just do a
+	 * native nested loop over all of the possible combinations.
+	 */
+	while ((elem = nvlist_next_nvpair(all, elem)) != NULL) {
+		name = nvpair_name(elem);
+		VERIFY(nvpair_value_nvlist(elem, &temp) == 0);
+
+		found = B_FALSE;
+		for (zd = list_head(&zone->zone_datasets); zd != NULL;
+		    zd = list_next(&zone->zone_datasets, zd)) {
+			if (zfs_ioc_zone_ds_matches(name, zd) == B_TRUE) {
+				if (zd->zd_alias == NULL) {
+					VERIFY(nvlist_add_string(temp,
+					    "name", name) == 0);
+					VERIFY(nvlist_add_nvlist(*configs,
+					    name, temp) == 0);
+				} else {
+					VERIFY(nvlist_add_string(temp,
+					    "name", zd->zd_alias) == 0);
+					VERIFY(nvlist_add_nvlist(*configs,
+					    zd->zd_alias, temp) == 0);
+				}
+				found = B_TRUE;
+			}
+		}
+		/*
+		 * If we found no zone_dataset_t, it was a VFS-style pass-
+		 * through into the zone. This kind has no aliasing, so
+		 * add the pool under its usual name.
+		 */
+		if (!found)
+			VERIFY(nvlist_add_nvlist(*configs, name, temp) == 0);
+	}
+
+out:
+	nvlist_free(temp);
+	return (error);
+}
+
 static int
 zfs_ioc_pool_configs(zfs_cmd_t *zc)
 {
@@ -1587,6 +1675,14 @@ zfs_ioc_pool_configs(zfs_cmd_t *zc)
 
 	if ((configs = spa_all_configs(&zc->zc_cookie)) == NULL)
 		return (SET_ERROR(EEXIST));
+
+	if (!INGLOBALZONE(curproc)) {
+		error = zfs_ioc_pool_configs_alias(&configs);
+		if (error) {
+			nvlist_free(configs);
+			return (SET_ERROR(error));
+		}
+	}
 
 	error = put_nvlist(zc, configs);
 
@@ -1613,6 +1709,28 @@ zfs_ioc_pool_stats(zfs_cmd_t *zc)
 
 	error = spa_get_stats(zc->zc_name, &config, zc->zc_value,
 	    sizeof (zc->zc_value));
+
+	/*
+	 * If we're returning the name property to a non-global zone, apply
+	 * aliases as needed.
+	 */
+	if (config != NULL && !INGLOBALZONE(curproc)) {
+		char *val = NULL;
+		zone_dataset_t *zd;
+		zone_t *zone = curzone;
+		boolean_t m;
+
+		if (nvlist_lookup_string(config, "name", &val) == 0) {
+			for (zd = list_head(&zone->zone_datasets); zd != NULL;
+			    zd = list_next(&zone->zone_datasets, zd)) {
+				m = zfs_ioc_zone_ds_matches(val, zd);
+				if (m == B_TRUE) {
+					VERIFY(nvlist_add_string(config,
+					    "name", zd->zd_alias) == 0);
+				}
+			}
+		}
+	}
 
 	if (config != NULL) {
 		ret = put_nvlist(zc, config);
@@ -2892,6 +3010,7 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 	spa_t *spa;
 	int error;
 	nvlist_t *nvp = NULL;
+	nvlist_t *temp;
 
 	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0) {
 		/*
@@ -2906,6 +3025,27 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 	} else {
 		error = spa_prop_get(spa, &nvp);
 		spa_close(spa, FTAG);
+	}
+
+	/* Apply aliases to pool info given to non-global zones. */
+	if (error == 0 && zc->zc_nvlist_dst != NULL &&
+	    !INGLOBALZONE(curproc) &&
+	    nvlist_lookup_nvlist(nvp, "name", &temp) == 0) {
+		char *val = NULL;
+		zone_dataset_t *zd;
+		zone_t *zone = curzone;
+		boolean_t m;
+
+		VERIFY(nvlist_lookup_string(temp, "value", &val) == 0);
+
+		for (zd = list_head(&zone->zone_datasets); zd != NULL;
+		    zd = list_next(&zone->zone_datasets, zd)) {
+			m = zfs_ioc_zone_ds_matches(val, zd);
+			if (m == B_TRUE) {
+				VERIFY(nvlist_add_string(temp,
+				    "value", zd->zd_alias) == 0);
+			}
+		}
 	}
 
 	if (error == 0 && zc->zc_nvlist_dst != NULL)
@@ -5883,6 +6023,9 @@ zfsdev_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 	const zfs_ioc_vec_t *vec;
 	char *saved_poolname = NULL;
 	nvlist_t *innvl = NULL;
+	char *oname = NULL;
+	zone_dataset_t *zd = NULL;
+	zone_t *zone = curzone;
 
 	if (minor != 0 &&
 	    zfsdev_get_soft_state(minor, ZSST_CTLDEV) == NULL)
@@ -5911,11 +6054,55 @@ zfsdev_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 			goto out;
 	}
 
-	/*
-	 * Ensure that all pool/dataset names are valid before we pass down to
-	 * the lower layers.
-	 */
+	/* Make certain zc_name is NULL-terminated. */
 	zc->zc_name[sizeof (zc->zc_name) - 1] = '\0';
+
+	/*
+	 * Non-global zones can have dataset aliases which need to be applied
+	 * before we pass down to lower layers.
+	 */
+	if (!INGLOBALZONE(curproc)) {
+		size_t len;
+		char *ptr;
+
+		switch (vec->zvec_namecheck) {
+		case POOL_NAME:
+			/*
+			 * Translate an alias pool back to the original parent
+			 * pool of the delegated dataset.
+			 */
+			for (zd = list_head(&zone->zone_datasets); zd != NULL;
+			    zd = list_next(&zone->zone_datasets, zd)) {
+				if (zd->zd_alias == NULL)
+					continue;
+
+				len = strlen(zd->zd_alias);
+				if (bcmp(zc->zc_name, zd->zd_alias, len) == 0
+				    && strlen(zc->zc_name) == len) {
+					(void) strcpy(zc->zc_name,
+					    zd->zd_dataset);
+					ptr = strchr(zc->zc_name, '/');
+					*ptr = '\0';
+					break;
+				}
+			}
+			break;
+		case DATASET_NAME:
+			oname = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+			(void) strcpy(oname, zc->zc_name);
+			error = zone_dataset_unalias(oname, zc->zc_name,
+			    MAXPATHLEN);
+			if (error != 0)
+				goto out;
+			break;
+		case NO_NAME:
+			break;
+		}
+	}
+
+	/*
+	 * Ensure that all pool/dataset names are valid.
+	 */
 	switch (vec->zvec_namecheck) {
 	case POOL_NAME:
 		if (pool_namecheck(zc->zc_name, NULL, NULL) != 0)
@@ -6003,6 +6190,33 @@ zfsdev_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 		error = vec->zvec_legacy_func(zc);
 	}
 
+	/*
+	 * On successful returns to a non-global zone, make sure any necessary
+	 * un-aliasing we applied earlier to zc_name is returned to the way it
+	 * was before.
+	 */
+	if (error == 0 && !INGLOBALZONE(curproc)) {
+		/*
+		 * If we're a pool-related ioctl, we should have translated
+		 * our input string, earlier, so check that and change it
+		 * back.
+		 */
+		if (vec->zvec_namecheck == POOL_NAME && zd != NULL) {
+			size_t len;
+			len = strlen(zc->zc_name);
+			if (bcmp(zd->zd_dataset, zc->zc_name, len) == 0)
+				(void) strcpy(zc->zc_name, zd->zd_alias);
+
+		} else if (zc->zc_name[0] != '\0') {
+			/* Otherwise, assume we're returning a dataset. */
+			if (oname == NULL)
+				oname = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+			(void) strcpy(oname, zc->zc_name);
+			error = zone_dataset_alias(oname, zc->zc_name,
+			    MAXPATHLEN);
+		}
+	}
+
 out:
 	nvlist_free(innvl);
 	rc = ddi_copyout(zc, (void *)arg, sizeof (zfs_cmd_t), flag);
@@ -6019,6 +6233,8 @@ out:
 	}
 
 	kmem_free(zc, sizeof (zfs_cmd_t));
+	if (oname != NULL)
+		kmem_free(oname, MAXPATHLEN);
 	return (error);
 }
 

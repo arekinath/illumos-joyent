@@ -7334,6 +7334,139 @@ zone_shutdown_global(void)
 }
 
 /*
+ * Gets the un-aliased system name for an aliased dataset within a zone.
+ *
+ * Returns 0 upon success and fills out the provided 'dataset' buffer.
+ */
+int
+zone_dataset_unalias(const char *alias, char *dataset, size_t sz)
+{
+	zone_dataset_t *zd;
+	zone_t *zone = curzone;
+	size_t len, alen;
+	boolean_t found = B_FALSE;
+	char *suffix;
+	const char *asuffix;
+
+	VERIFY(alias != NULL);
+	VERIFY(dataset != NULL);
+
+	if (alias[0] == '\0') {
+		dataset[0] = '\0';
+		return (0);
+	}
+
+	/*
+	 * Walk the list once, looking for datasets which match exactly, or
+	 * specify a dataset underneath an exported dataset.  If found, exit
+	 * the loop after unsetting 'ret', so we can process it further.
+	 */
+	for (zd = list_head(&zone->zone_datasets); zd != NULL;
+	    zd = list_next(&zone->zone_datasets, zd)) {
+		if (zd->zd_alias == NULL)
+			continue;
+
+		alen = strlen(zd->zd_alias);
+		if (strlen(alias) >= alen &&
+		    bcmp(alias, zd->zd_alias, alen) == 0 &&
+		    (alias[alen] == '\0' || alias[alen] == '/' ||
+		    alias[alen] == '@')) {
+			found = B_TRUE;
+			break;
+		}
+	}
+
+	/*
+	 * If we didn't find any zone_dataset_t that matched, assume the
+	 * dataset's system name is the same as the name the zone used
+	 * (ie, assume no aliasing is in effect).
+	 */
+	if (found == B_FALSE) {
+		len = strlen(alias);
+		if (len >= sz - 1)
+			return (ENOSPC);
+		bcopy(alias, dataset, len);
+		dataset[len] = '\0';
+		return (0);
+	}
+
+	/* If aliased: place dataset name, then suffix in buffer. */
+	len = strlen(zd->zd_dataset);
+	asuffix = &alias[alen];
+	if (strlen(asuffix) + len >= sz - 1)
+		return (ENOSPC);
+	bcopy(zd->zd_dataset, dataset, len);
+	suffix = &dataset[len];
+	(void) strcpy(suffix, asuffix);
+
+	return (0);
+}
+
+/*
+ * Gets the aliased name for a dataset within a zone.
+ *
+ * Returns 0 upon success and fills out the provided 'alias' buffer.
+ */
+int
+zone_dataset_alias(const char *dataset, char *alias, size_t sz)
+{
+	zone_dataset_t *zd;
+	zone_t *zone = curzone;
+	size_t len, alen;
+	boolean_t found = B_FALSE;
+	const char *suffix;
+	char *asuffix;
+
+	VERIFY(alias != NULL);
+	VERIFY(dataset != NULL);
+
+	if (dataset[0] == '\0') {
+		alias[0] = '\0';
+		return (0);
+	}
+
+	/*
+	 * Walk the list once, looking for datasets which match exactly, or
+	 * specify a dataset underneath an exported dataset.  If found, exit
+	 * the loop after unsetting 'ret', so we can process it further.
+	 */
+	for (zd = list_head(&zone->zone_datasets); zd != NULL;
+	    zd = list_next(&zone->zone_datasets, zd)) {
+		len = strlen(zd->zd_dataset);
+		if (strlen(dataset) >= len &&
+		    bcmp(dataset, zd->zd_dataset, len) == 0 &&
+		    (dataset[len] == '\0' || dataset[len] == '/' ||
+		    dataset[len] == '@')) {
+			found = B_TRUE;
+			break;
+		}
+	}
+
+	if (found == B_FALSE)
+		return (EINVAL);
+
+	if (zd->zd_alias == NULL) {
+		/* Simple case: just copy the whole name. */
+		alen = strlen(dataset);
+		if (alen >= sz - 1)
+			return (ENOSPC);
+		bcopy(dataset, alias, alen);
+		alias[alen] = '\0';
+	} else {
+		/* If aliased: place alias, then suffix in buffer. */
+		alen = strlen(zd->zd_alias);
+		suffix = &dataset[len];
+		if (strlen(suffix) + alen >= sz - 1)
+			return (ENOSPC);
+		bcopy(zd->zd_alias, alias, alen);
+		asuffix = &alias[alen];
+		(void) strcpy(asuffix, suffix);
+	}
+
+	return (0);
+}
+
+/*
  * Returns true if the named dataset is visible in the current zone.
  * The 'write' parameter is set to 1 if the dataset is also writable.
  */
@@ -7357,7 +7490,6 @@ zone_dataset_visible(const char *dataset, int *write)
 	 */
 	for (zd = list_head(&zone->zone_datasets); zd != NULL;
 	    zd = list_next(&zone->zone_datasets, zd)) {
-
 		len = strlen(zd->zd_dataset);
 		if (strlen(dataset) >= len &&
 		    bcmp(dataset, zd->zd_dataset, len) == 0 &&
