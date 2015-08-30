@@ -321,7 +321,7 @@ spa_all_configs(uint64_t *generation)
 	mutex_enter(&spa_namespace_lock);
 	while ((spa = spa_next(spa)) != NULL) {
 		if (INGLOBALZONE(curproc) ||
-		    zone_dataset_visible(spa_name(spa), NULL)) {
+		    zone_dataset_visible(spa_name(spa), NULL, B_TRUE)) {
 			mutex_enter(&spa->spa_props_lock);
 			fnvlist_add_nvlist(pools, spa_name(spa),
 			    spa->spa_config);

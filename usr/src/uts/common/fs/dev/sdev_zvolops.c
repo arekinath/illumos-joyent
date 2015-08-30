@@ -403,6 +403,8 @@ devzvol_create_pool_dirs(struct vnode *dvp)
 	nvlist_t *nv = NULL;
 	nvpair_t *elem = NULL;
 	int pools = 0;
+	zone_t *zone = curzone;
+	zone_dataset_t *zd;
 	int rc;
 
 	sdcmn_err13(("devzvol_create_pool_dirs"));
@@ -432,6 +434,17 @@ devzvol_create_pool_dirs(struct vnode *dvp)
 		 * should either work or we should get an error if this should
 		 * not be visible from the zone, or disallowed in the zone
 		 */
+		if (rc == 0)
+			VN_RELE(vp);
+		pools++;
+	}
+	for (zd = list_head(&zone->zone_datasets); zd != NULL;
+	    zd = list_next(&zone->zone_datasets, zd)) {
+		struct vnode *vp;
+		if (zd->zd_alias == NULL)
+			continue;
+		rc = VOP_LOOKUP(dvp, zd->zd_alias, &vp, NULL, 0,
+		    NULL, kcred, NULL, 0, NULL);
 		if (rc == 0)
 			VN_RELE(vp);
 		pools++;
@@ -786,8 +799,19 @@ sdev_iter_datasets(struct vnode *dvp, int arg, char *name)
 		char *ptr;
 
 		sdcmn_err13(("  name %s", zc->zc_name));
+		/*
+		 * ZFS names containing $ and % are special and can never be
+		 * zvols: ignore them.
+		 */
 		if (strchr(zc->zc_name, '$') || strchr(zc->zc_name, '%'))
 			goto skip;
+		/*
+		 * zvols can never occur at the root of a pool, so the path
+		 * must contain a '/'. If this path doesn't, ignore it.
+		 */
+		if (strrchr(zc->zc_name, '/') == NULL) {
+			goto skip;
+		}
 		ptr = strrchr(zc->zc_name, '/') + 1;
 		rc = devzvol_lookup(dvp, ptr, &vpp, NULL, 0, NULL,
 		    kcred, NULL, NULL, NULL);

@@ -204,6 +204,8 @@ static uint_t zfs_allow_log_key;
 typedef int zfs_ioc_legacy_func_t(zfs_cmd_t *);
 typedef int zfs_ioc_func_t(const char *, nvlist_t *, nvlist_t *);
 typedef int zfs_secpolicy_func_t(zfs_cmd_t *, nvlist_t *, cred_t *);
+typedef int zfs_alias_func_t(zfs_cmd_t *, nvlist_t **, nvlist_t **, cred_t *);
+typedef int zfs_unalias_func_t(zfs_cmd_t *, nvlist_t **, cred_t *);
 
 typedef enum {
 	NO_NAME,
@@ -222,6 +224,8 @@ typedef struct zfs_ioc_vec {
 	zfs_ioc_func_t		*zvec_func;
 	zfs_secpolicy_func_t	*zvec_secpolicy;
 	zfs_ioc_namecheck_t	zvec_namecheck;
+	zfs_alias_func_t	*zvec_alias;
+	zfs_unalias_func_t	*zvec_unalias;
 	boolean_t		zvec_allow_log;
 	zfs_ioc_poolcheck_t	zvec_pool_check;
 	boolean_t		zvec_smush_outnvlist;
@@ -282,6 +286,463 @@ __dprintf(const char *file, const char *func, int line, const char *fmt, ...)
 	 */
 	DTRACE_PROBE4(zfs__dprintf,
 	    char *, newfile, char *, func, int, line, char *, buf);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_noop(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (0);
+}
+
+/* ARGSUSED */
+static int
+zfs_alias_noop(zfs_cmd_t *zc, nvlist_t **innvl, nvlist_t **outnvl, cred_t *cr)
+{
+	return (0);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_dsname(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	char *oname;
+	int error;
+
+	oname = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+	if (strlcpy(oname, zc->zc_name, MAXPATHLEN) >= MAXPATHLEN)
+		error = ENOSPC;
+	else
+		error = zone_dataset_unalias(oname, zc->zc_name, MAXPATHLEN);
+	kmem_free(oname, MAXPATHLEN);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_value(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	char *oname;
+	int error;
+
+	oname = kmem_zalloc(MAXPATHLEN * 2, KM_SLEEP);
+	if (strlcpy(oname, zc->zc_name, MAXPATHLEN * 2) >= MAXPATHLEN * 2) {
+		error = ENOSPC;
+	} else {
+		error = zone_dataset_unalias(oname, zc->zc_value,
+		    MAXPATHLEN * 2);
+	}
+	kmem_free(oname, MAXPATHLEN * 2);
+
+	if (error != 0)
+		return (error);
+
+	error = zfs_unalias_dsname(zc, innvl, cr);
+
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_poolname(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	zone_t *zone = curzone;
+	zone_dataset_t *zd = NULL;
+	char *ptr;
+	size_t len;
+
+	if (zc->zc_name[0] == '\0')
+		return (0);
+
+	zc->zc_action_handle = 0;
+
+	/*
+	 * First look for any straight-through zone dataset entries that mean
+	 * that this poolname should not be aliased.
+	 */
+	for (zd = list_head(&zone->zone_datasets); zd != NULL;
+	    zd = list_next(&zone->zone_datasets, zd)) {
+		if (zd->zd_alias != NULL)
+			continue;
+
+		len = strlen(zd->zd_dataset);
+		ptr = strchr(zd->zd_dataset, '/');
+		if (ptr != NULL)
+			len = (ptr - zd->zd_dataset);
+		if (bcmp(zc->zc_name, zd->zd_dataset, len) == 0 &&
+		    strlen(zc->zc_name) == len) {
+			/*
+			 * Stash the zone_dataset_t that matches in the
+			 * zfs_cmd_t, so that we can pull it back out later in
+			 * zfs_alias_poolname. The zc_action_handle field is
+			 * never used by any pool-related ioctls (only by
+			 * IOC_RECV), so overwriting it should be ok.
+			 */
+			zc->zc_action_handle = (uint64_t)((uintptr_t)zd);
+			return (0);
+		}
+	}
+	/* Now try to find an alias. */
+	for (zd = list_head(&zone->zone_datasets); zd != NULL;
+	    zd = list_next(&zone->zone_datasets, zd)) {
+		if (zd->zd_alias == NULL)
+			continue;
+
+		len = strlen(zd->zd_alias);
+		if (bcmp(zc->zc_name, zd->zd_alias, len) == 0
+		    && strlen(zc->zc_name) == len) {
+			zc->zc_action_handle = (uint64_t)((uintptr_t)zd);
+			(void) strlcpy(zc->zc_name, zd->zd_dataset,
+			    sizeof (zc->zc_name));
+			ptr = strchr(zc->zc_name, '/');
+			if (ptr != NULL)
+				*ptr = '\0';
+			break;
+		}
+	}
+
+	return (0);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_oneprop_common(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr,
+    const char *key)
+{
+	char *firstsnap;
+	char *nfirstsnap = NULL;
+	int error;
+	size_t len;
+
+	if (nvlist_lookup_string(*innvl, key, &firstsnap) != 0)
+		return (EINVAL);
+
+	nfirstsnap = kmem_zalloc(MAXPATHLEN * 2, KM_SLEEP);
+	error = zone_dataset_unalias(firstsnap, nfirstsnap, MAXPATHLEN * 2);
+	if (error != 0)
+		goto out;
+	error = nvlist_add_string(*innvl, key, nfirstsnap);
+	if (error != 0)
+		goto out;
+	error = zfs_unalias_dsname(zc, innvl, cr);
+
+out:
+	if (nfirstsnap != NULL)
+		kmem_free(nfirstsnap, MAXPATHLEN * 2);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_origin(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (zfs_unalias_oneprop_common(zc, innvl, cr, "origin"));
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_from(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (zfs_unalias_oneprop_common(zc, innvl, cr, "from"));
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_fromsnap(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (zfs_unalias_oneprop_common(zc, innvl, cr, "fromsnap"));
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_firstsnap(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (zfs_unalias_oneprop_common(zc, innvl, cr, "firstsnap"));
+}
+
+/* ARGSUSED */
+static int
+zfs_alias_dsname(zfs_cmd_t *zc, nvlist_t **innvl, nvlist_t **outnvl, cred_t *cr)
+{
+	char *oname;
+	int error;
+	if (zc->zc_name[0] == '\0')
+		return (0);
+
+	/* Otherwise, try to alias as if it's a dataset. */
+	oname = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+	if (strlcpy(oname, zc->zc_name, MAXPATHLEN) >= MAXPATHLEN)
+		error = ENOSPC;
+	else
+		error = zone_dataset_alias(oname, zc->zc_name, MAXPATHLEN);
+	kmem_free(oname, MAXPATHLEN);
+	/* But ignore EINVAL, in case it's not actually one. */
+	if (error == EINVAL)
+		error = 0;
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_alias_value(zfs_cmd_t *zc, nvlist_t **innvl, nvlist_t **outnvl, cred_t *cr)
+{
+	char *oname;
+	int error;
+	if (zc->zc_value[0] == '\0')
+		return (0);
+
+	oname = kmem_zalloc(MAXPATHLEN * 2, KM_SLEEP);
+	if (strlcpy(oname, zc->zc_value, MAXPATHLEN * 2) >= MAXPATHLEN * 2) {
+		error = ENOSPC;
+	} else {
+		error = zone_dataset_alias(oname, zc->zc_value, MAXPATHLEN * 2);
+	}
+	kmem_free(oname, MAXPATHLEN * 2);
+
+	if (error != 0)
+		return (error);
+
+	error = zfs_alias_dsname(zc, innvl, outnvl, cr);
+
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_alias_string_value(zfs_cmd_t *zc, nvlist_t **innvl, nvlist_t **outnvl,
+    cred_t *cr)
+{
+	char *oname;
+	int error;
+	if (zc->zc_string[0] == '\0')
+		return (0);
+
+	oname = kmem_zalloc(MAXNAMELEN, KM_SLEEP);
+	if (strlcpy(oname, zc->zc_string, MAXNAMELEN) >= MAXNAMELEN)
+		error = ENOSPC;
+	else
+		error = zone_dataset_alias(oname, zc->zc_string, MAXNAMELEN);
+	kmem_free(oname, MAXNAMELEN);
+
+	if (error != 0)
+		return (error);
+
+	error = zfs_alias_value(zc, innvl, outnvl, cr);
+
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_alias_poolname(zfs_cmd_t *zc, nvlist_t **innvl, nvlist_t **outnvl,
+    cred_t *cr)
+{
+	zone_dataset_t *zd;
+
+	if (zc->zc_name[0] == '\0')
+		return (0);
+
+	/*
+	 * We stashed the pointer to the zone_dataset_t in the zc_action_handle
+	 * member back in zfs_unalias_poolname.
+	 */
+	zd = (zone_dataset_t *)((uintptr_t)zc->zc_action_handle);
+	VERIFY(zd != NULL);
+
+	/* Zero it so we don't leak the pointer back to userland. */
+	zc->zc_action_handle = 0;
+
+	if (zd->zd_alias == NULL)
+		return (0);
+
+	(void) strlcpy(zc->zc_name, zd->zd_alias, sizeof (zc->zc_name));
+
+	return (0);
+}
+
+static int
+zfs_map_nvlist_kv_str(nvlist_t *nvl, nvlist_t *innvl, boolean_t dovalues,
+    int (*func)(const char *, char *, size_t))
+{
+	nvpair_t *pair;
+	int error = 0;
+	char *nname = NULL, *nvalue = NULL;
+
+	for (pair = nvlist_next_nvpair(innvl, NULL); pair != NULL;
+	    pair = nvlist_next_nvpair(innvl, pair)) {
+		const char *name = nvpair_name(pair);
+		char *value;
+
+		if (dovalues) {
+			if (nvpair_type(pair) != DATA_TYPE_STRING) {
+				error = EINVAL;
+				goto out;
+			}
+			error = nvpair_value_string(pair, &value);
+			if (error != 0)
+				goto out;
+		}
+
+		if (nname == NULL)
+			nname = kmem_zalloc(MAXPATHLEN * 2, KM_SLEEP);
+		error = (*func)(name, nname, MAXPATHLEN * 2);
+		if (error != 0)
+			goto out;
+
+		if (dovalues) {
+			if (nvalue == NULL)
+				nvalue = kmem_zalloc(MAXPATHLEN * 2, KM_SLEEP);
+			error = (*func)(value, nvalue, MAXPATHLEN * 2);
+			if (error != 0)
+				goto out;
+
+			error = nvlist_add_string(nvl, nname, nvalue);
+			if (error != 0)
+				goto out;
+		} else {
+			error = nvlist_add_named_nvpair(nvl, nname, pair);
+			if (error != 0)
+				goto out;
+		}
+	}
+
+out:
+	if (nname != NULL)
+		kmem_free(nname, MAXPATHLEN * 2);
+	if (nvalue != NULL)
+		kmem_free(nvalue, MAXPATHLEN * 2);
+	return (error);
+}
+
+static int
+zfs_unalias_nvl_common(nvlist_t **innvl, boolean_t dovalues)
+{
+	nvlist_t *nvl = NULL;
+	int error;
+
+	if (*innvl == NULL)
+		return (EINVAL);
+
+	error = nvlist_alloc(&nvl, NV_UNIQUE_NAME, KM_SLEEP);
+	if (error != 0)
+		goto out;
+
+	error = zfs_map_nvlist_kv_str(nvl, *innvl, dovalues,
+	    zone_dataset_unalias);
+	if (error != 0)
+		goto out;
+
+	nvlist_free(*innvl);
+	*innvl = nvl;
+	nvl = NULL;
+
+out:
+	nvlist_free(nvl);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_nvlkeys(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	int error;
+	error = zfs_unalias_poolname(zc, innvl, cr);
+	if (error)
+		return (error);
+	error = zfs_unalias_nvl_common(innvl, B_FALSE);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_nvl(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	int error;
+	error = zfs_unalias_poolname(zc, innvl, cr);
+	if (error)
+		return (error);
+	error = zfs_unalias_nvl_common(innvl, B_TRUE);
+	return (error);
+}
+
+static int
+zfs_alias_nvl_common(nvlist_t **outnvl, boolean_t dovalues)
+{
+	nvlist_t *nvl = NULL;
+	int error;
+
+	if (*outnvl == NULL)
+		return (EINVAL);
+
+	error = nvlist_alloc(&nvl, NV_UNIQUE_NAME, KM_SLEEP);
+	if (error != 0)
+		goto out;
+
+	error = zfs_map_nvlist_kv_str(nvl, *outnvl, dovalues,
+	    zone_dataset_alias);
+	if (error != 0)
+		goto out;
+
+	nvlist_free(*outnvl);
+	*outnvl = nvl;
+	nvl = NULL;
+
+out:
+	nvlist_free(nvl);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_alias_nvlkeys(zfs_cmd_t *zc, nvlist_t **innvl, nvlist_t **outnvl,
+    cred_t *cr)
+{
+	int error;
+	error = zfs_alias_poolname(zc, innvl, outnvl, cr);
+	if (error)
+		return (error);
+	error = zfs_alias_nvl_common(outnvl, B_FALSE);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_subnvl_common(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr,
+    const char *key, boolean_t dovalues)
+{
+	nvlist_t *snaps;
+	int error;
+
+	error = zfs_unalias_poolname(zc, innvl, cr);
+	if (error)
+		return (error);
+
+	if (*innvl == NULL)
+		return (EINVAL);
+	if (nvlist_lookup_nvlist(*innvl, key, &snaps) != 0)
+		return (EINVAL);
+
+	error = zfs_unalias_nvl_common(&snaps, dovalues);
+	if (error != 0)
+		return (error);
+
+	error = nvlist_add_nvlist(*innvl, key, snaps);
+	nvlist_free(snaps);
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_holds(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (zfs_unalias_subnvl_common(zc, innvl, cr, "holds", B_FALSE));
+}
+
+/* ARGSUSED */
+static int
+zfs_unalias_snaps(zfs_cmd_t *zc, nvlist_t **innvl, cred_t *cr)
+{
+	return (zfs_unalias_subnvl_common(zc, innvl, cr, "snaps", B_FALSE));
 }
 
 static void
@@ -406,7 +867,18 @@ static int
 zfs_secpolicy_read(zfs_cmd_t *zc, nvlist_t *innvl, cred_t *cr)
 {
 	if (INGLOBALZONE(curproc) ||
-	    zone_dataset_visible(zc->zc_name, NULL))
+	    zone_dataset_visible(zc->zc_name, NULL, B_FALSE))
+		return (0);
+
+	return (SET_ERROR(ENOENT));
+}
+
+/* ARGSUSED */
+static int
+zfs_secpolicy_read_pool(zfs_cmd_t *zc, nvlist_t *innvl, cred_t *cr)
+{
+	if (INGLOBALZONE(curproc) ||
+	    zone_dataset_visible(zc->zc_name, NULL, B_TRUE))
 		return (0);
 
 	return (SET_ERROR(ENOENT));
@@ -422,7 +894,7 @@ zfs_dozonecheck_impl(const char *dataset, uint64_t zoned, cred_t *cr)
 	 * so they don't see EPERM on something they shouldn't know about.
 	 */
 	if (!INGLOBALZONE(curproc) &&
-	    !zone_dataset_visible(dataset, &writable))
+	    !zone_dataset_visible(dataset, &writable, B_FALSE))
 		return (SET_ERROR(ENOENT));
 
 	if (INGLOBALZONE(curproc)) {
@@ -1581,6 +2053,91 @@ zfs_ioc_pool_export(zfs_cmd_t *zc)
 	return (error);
 }
 
+static boolean_t
+zfs_zone_ds_matches_alias(const char *dataset, zone_dataset_t *zd)
+{
+	size_t len;
+
+	len = strlen(zd->zd_dataset);
+	if (strlen(dataset) >= len &&
+	    bcmp(dataset, zd->zd_dataset, len) == 0 &&
+	    (dataset[len] == '\0' || dataset[len] == '/' ||
+	    dataset[len] == '@')) {
+		return (B_TRUE);
+	}
+
+	len = strlen(dataset);
+	if (dataset[len - 1] == '/')
+		len--;	/* Ignore trailing slash */
+	if (len < strlen(zd->zd_dataset) &&
+	    bcmp(dataset, zd->zd_dataset, len) == 0 &&
+	    zd->zd_dataset[len] == '/') {
+		return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+static int
+zfs_alias_pool_configs(nvlist_t **configs)
+{
+	nvlist_t *all = *configs;
+	nvlist_t *pool = NULL;
+	nvpair_t *elem = NULL;
+	const char *name;
+	zone_dataset_t *zd;
+	boolean_t found;
+	int error = 0;
+	zone_t *zone = curzone;
+
+	*configs = NULL;
+	VERIFY(nvlist_alloc(configs, NV_UNIQUE_NAME, KM_SLEEP) == 0);
+
+	/*
+	 * For each pool, we want to create an entry in the final list,
+	 * and possibly rename it to reflect an alias. It's also possible
+	 * we will need to do both (for two delegated datasets under the
+	 * same pool, one aliased and one not).
+	 *
+	 * Since we made configs with NV_UNIQUE_NAME, re-adding the same
+	 * pool multiple times is not really a problem, so we just do a
+	 * naive nested loop over all of the possible combinations.
+	 */
+	while ((elem = nvlist_next_nvpair(all, elem)) != NULL) {
+		name = nvpair_name(elem);
+		VERIFY(nvpair_value_nvlist(elem, &pool) == 0);
+
+		found = B_FALSE;
+		for (zd = list_head(&zone->zone_datasets); zd != NULL;
+		    zd = list_next(&zone->zone_datasets, zd)) {
+			if (zfs_zone_ds_matches_alias(name, zd) == B_TRUE) {
+				if (zd->zd_alias == NULL) {
+					fnvlist_add_string(pool, "name", name);
+					fnvlist_add_nvlist(*configs, name,
+					    pool);
+				} else {
+					fnvlist_add_string(pool, "name",
+					    zd->zd_alias);
+					fnvlist_add_nvlist(*configs,
+					    zd->zd_alias, pool);
+				}
+				found = B_TRUE;
+			}
+		}
+		/*
+		 * If we found no zone_dataset_t, it was a VFS-style pass-
+		 * through into the zone. This kind has no aliasing, so
+		 * add the pool under its usual name.
+		 */
+		if (found == B_FALSE)
+			fnvlist_add_nvlist(*configs, name, pool);
+	}
+
+out:
+	nvlist_free(all);
+	return (error);
+}
+
 static int
 zfs_ioc_pool_configs(zfs_cmd_t *zc)
 {
@@ -1589,6 +2146,14 @@ zfs_ioc_pool_configs(zfs_cmd_t *zc)
 
 	if ((configs = spa_all_configs(&zc->zc_cookie)) == NULL)
 		return (SET_ERROR(EEXIST));
+
+	if (!INGLOBALZONE(curproc)) {
+		error = zfs_alias_pool_configs(&configs);
+		if (error != 0) {
+			nvlist_free(configs);
+			return (SET_ERROR(error));
+		}
+	}
 
 	error = put_nvlist(zc, configs);
 
@@ -1610,11 +2175,30 @@ static int
 zfs_ioc_pool_stats(zfs_cmd_t *zc)
 {
 	nvlist_t *config;
+	zone_dataset_t *zd;
 	int error;
 	int ret = 0;
 
 	error = spa_get_stats(zc->zc_name, &config, zc->zc_value,
 	    sizeof (zc->zc_value));
+
+	/*
+	 * If we're returning the name property to a non-global zone, apply
+	 * aliases as needed.
+	 */
+	if (config != NULL && !INGLOBALZONE(curproc)) {
+		/*
+		 * We stashed the pointer to the zone_dataset_t in the
+		 * zc_action_handle member back in zfs_unalias_poolname.
+		 */
+		zd = (zone_dataset_t *)((uintptr_t)zc->zc_action_handle);
+		if (zd == NULL)
+			return (EINVAL);
+
+		if (zd->zd_alias != NULL)
+			VERIFY0(nvlist_add_string(config, "name",
+			    zd->zd_alias));
+	}
 
 	if (config != NULL) {
 		ret = put_nvlist(zc, config);
@@ -2040,6 +2624,90 @@ zfs_ioc_vdev_setfru(zfs_cmd_t *zc)
 }
 
 static int
+zfs_alias_propsrcs(nvlist_t **outnvl)
+{
+	nvlist_t *prop;
+	nvpair_t *pair;
+	int error = 0;
+	boolean_t remorigin = B_FALSE;
+	char *src;
+	char *newsrc = kmem_zalloc(MAXPATHLEN * 2, KM_SLEEP);
+
+	if (*outnvl == NULL)
+		goto out;
+
+	for (pair = nvlist_next_nvpair(*outnvl, NULL); pair != NULL;
+	    pair = nvlist_next_nvpair(*outnvl, pair)) {
+		const char *name = nvpair_name(pair);
+		if (nvpair_type(pair) != DATA_TYPE_NVLIST) {
+			error = EINVAL;
+			goto out;
+		}
+		if ((error = nvpair_value_nvlist(pair, &prop)) != 0)
+			goto out;
+
+		if (strcmp(name, "origin") == 0 ||
+		    strcmp(name, "prevsnap") == 0) {
+			error = nvlist_lookup_string(prop, "value", &src);
+			if (error != 0)
+				goto out;
+			error = zone_dataset_alias(src, newsrc, MAXPATHLEN * 2);
+			if (error == EINVAL) {
+				remorigin = B_TRUE;
+			} else if (error != 0) {
+				goto out;
+			}
+			error = nvlist_add_string(prop, "value", newsrc);
+			if (error != 0)
+				goto out;
+		}
+		if (strcmp(name, "clones") == 0) {
+			nvlist_t *clones;
+			error = nvlist_lookup_nvlist(prop, "value", &clones);
+			if (error != 0)
+				goto out;
+			error = zfs_alias_nvl_common(&clones, B_FALSE);
+			if (error != 0)
+				goto out;
+			error = nvlist_add_nvlist(prop, "value", clones);
+			nvlist_free(clones);
+			if (error != 0)
+				goto out;
+		}
+
+		if (nvlist_lookup_string(prop, "source", &src) != 0)
+			continue;
+		if (strlen(src) == 0)
+			continue;
+
+		error = zone_dataset_alias(src, newsrc, MAXPATHLEN * 2);
+		if (error == EINVAL) {
+			/*
+			 * This is a parent of an aliased dataset and has no
+			 * representation in the zone.
+			 */
+			(void) strcpy(newsrc, "global zone");
+		} else if (error != 0) {
+			goto out;
+		}
+
+		if ((error = nvlist_add_string(prop, "source", newsrc)) != 0)
+			goto out;
+	}
+
+	/*
+	 * If the dataset has an origin that's outside the namespace available
+	 * to this zone, just drop the origin property.
+	 */
+	if (remorigin)
+		error = nvlist_remove_all(*outnvl, "origin");
+
+out:
+	kmem_free(newsrc, MAXPATHLEN * 2);
+	return (error);
+}
+
+static int
 zfs_ioc_objset_stats_impl(zfs_cmd_t *zc, objset_t *os,
     boolean_t cachedpropsonly)
 {
@@ -2066,7 +2734,10 @@ zfs_ioc_objset_stats_impl(zfs_cmd_t *zc, objset_t *os,
 				return (error);
 			VERIFY0(error);
 		}
-		error = put_nvlist(zc, nv);
+		if (!INGLOBALZONE(curproc))
+			error = zfs_alias_propsrcs(&nv);
+		if (error == 0)
+			error = put_nvlist(zc, nv);
 		nvlist_free(nv);
 	}
 
@@ -2220,8 +2891,10 @@ dataset_name_hidden(const char *name)
 		return (B_TRUE);
 	if (strchr(name, '%') != NULL)
 		return (B_TRUE);
-	if (!INGLOBALZONE(curproc) && !zone_dataset_visible(name, NULL))
+	if (!INGLOBALZONE(curproc) && !zone_dataset_visible(name, NULL,
+	    B_FALSE)) {
 		return (B_TRUE);
+	}
 	return (B_FALSE);
 }
 
@@ -2894,6 +3567,7 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 	spa_t *spa;
 	int error;
 	nvlist_t *nvp = NULL;
+	nvlist_t *prop;
 
 	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0) {
 		/*
@@ -2908,6 +3582,25 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 	} else {
 		error = spa_prop_get(spa, &nvp);
 		spa_close(spa, FTAG);
+	}
+
+	/* Apply aliases to pool info given to non-global zones. */
+	if (error == 0 && zc->zc_nvlist_dst != NULL &&
+	    !INGLOBALZONE(curproc) &&
+	    nvlist_lookup_nvlist(nvp, "name", &prop) == 0) {
+		zone_dataset_t *zd;
+
+		/*
+		 * We stashed the pointer to the zone_dataset_t in the
+		 * zc_action_handle member back in zfs_unalias_poolname.
+		 */
+		zd = (zone_dataset_t *)((uintptr_t)zc->zc_action_handle);
+		if (zd == NULL)
+			return (EINVAL);
+
+		if (zd->zd_alias != NULL)
+			VERIFY0(nvlist_add_string(prop, "value",
+			    zd->zd_alias));
 	}
 
 	if (error == 0 && zc->zc_nvlist_dst != NULL)
@@ -3520,6 +4213,7 @@ zfs_ioc_destroy_snaps(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 	nvlist_t *snaps;
 	nvpair_t *pair;
 	boolean_t defer;
+	int error;
 
 	if (nvlist_lookup_nvlist(innvl, "snaps", &snaps) != 0)
 		return (SET_ERROR(EINVAL));
@@ -3530,7 +4224,9 @@ zfs_ioc_destroy_snaps(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 		(void) zfs_unmount_snap(nvpair_name(pair));
 	}
 
-	return (dsl_destroy_snapshots_nvl(snaps, defer, outnvl));
+	error = dsl_destroy_snapshots_nvl(snaps, defer, outnvl);
+
+	return (error);
 }
 
 /*
@@ -5565,6 +6261,7 @@ static zfs_ioc_vec_t zfs_ioc_vec[ZFS_IOC_LAST - ZFS_IOC_FIRST];
 static void
 zfs_ioctl_register_legacy(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
     zfs_secpolicy_func_t *secpolicy, zfs_ioc_namecheck_t namecheck,
+    zfs_unalias_func_t *unalias, zfs_alias_func_t *alias,
     boolean_t log_history, zfs_ioc_poolcheck_t pool_check)
 {
 	zfs_ioc_vec_t *vec = &zfs_ioc_vec[ioc - ZFS_IOC_FIRST];
@@ -5577,6 +6274,8 @@ zfs_ioctl_register_legacy(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
 	vec->zvec_legacy_func = func;
 	vec->zvec_secpolicy = secpolicy;
 	vec->zvec_namecheck = namecheck;
+	vec->zvec_unalias = unalias;
+	vec->zvec_alias = alias;
 	vec->zvec_allow_log = log_history;
 	vec->zvec_pool_check = pool_check;
 }
@@ -5588,6 +6287,7 @@ zfs_ioctl_register_legacy(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
 static void
 zfs_ioctl_register(const char *name, zfs_ioc_t ioc, zfs_ioc_func_t *func,
     zfs_secpolicy_func_t *secpolicy, zfs_ioc_namecheck_t namecheck,
+    zfs_unalias_func_t *unalias, zfs_alias_func_t *alias,
     zfs_ioc_poolcheck_t pool_check, boolean_t smush_outnvlist,
     boolean_t allow_log)
 {
@@ -5605,6 +6305,8 @@ zfs_ioctl_register(const char *name, zfs_ioc_t ioc, zfs_ioc_func_t *func,
 	vec->zvec_func = func;
 	vec->zvec_secpolicy = secpolicy;
 	vec->zvec_namecheck = namecheck;
+	vec->zvec_unalias = unalias;
+	vec->zvec_alias = alias;
 	vec->zvec_pool_check = pool_check;
 	vec->zvec_smush_outnvlist = smush_outnvlist;
 	vec->zvec_allow_log = allow_log;
@@ -5616,7 +6318,8 @@ zfs_ioctl_register_pool(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
     zfs_ioc_poolcheck_t pool_check)
 {
 	zfs_ioctl_register_legacy(ioc, func, secpolicy,
-	    POOL_NAME, log_history, pool_check);
+	    POOL_NAME, zfs_unalias_poolname, zfs_alias_poolname,
+	    log_history, pool_check);
 }
 
 static void
@@ -5624,14 +6327,16 @@ zfs_ioctl_register_dataset_nolog(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
     zfs_secpolicy_func_t *secpolicy, zfs_ioc_poolcheck_t pool_check)
 {
 	zfs_ioctl_register_legacy(ioc, func, secpolicy,
-	    DATASET_NAME, B_FALSE, pool_check);
+	    DATASET_NAME, zfs_unalias_dsname, zfs_alias_dsname,
+	    B_FALSE, pool_check);
 }
 
 static void
 zfs_ioctl_register_pool_modify(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func)
 {
 	zfs_ioctl_register_legacy(ioc, func, zfs_secpolicy_config,
-	    POOL_NAME, B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
+	    POOL_NAME, zfs_unalias_poolname, zfs_alias_poolname,
+	    B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
 }
 
 static void
@@ -5639,7 +6344,8 @@ zfs_ioctl_register_pool_meta(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
     zfs_secpolicy_func_t *secpolicy)
 {
 	zfs_ioctl_register_legacy(ioc, func, secpolicy,
-	    NO_NAME, B_FALSE, POOL_CHECK_NONE);
+	    NO_NAME, zfs_unalias_poolname, zfs_alias_poolname,
+	    B_FALSE, POOL_CHECK_NONE);
 }
 
 static void
@@ -5647,7 +6353,8 @@ zfs_ioctl_register_dataset_read_secpolicy(zfs_ioc_t ioc,
     zfs_ioc_legacy_func_t *func, zfs_secpolicy_func_t *secpolicy)
 {
 	zfs_ioctl_register_legacy(ioc, func, secpolicy,
-	    DATASET_NAME, B_FALSE, POOL_CHECK_SUSPENDED);
+	    DATASET_NAME, zfs_unalias_dsname, zfs_alias_dsname, B_FALSE,
+	    POOL_CHECK_SUSPENDED);
 }
 
 static void
@@ -5662,7 +6369,8 @@ zfs_ioctl_register_dataset_modify(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
     zfs_secpolicy_func_t *secpolicy)
 {
 	zfs_ioctl_register_legacy(ioc, func, secpolicy,
-	    DATASET_NAME, B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
+	    DATASET_NAME, zfs_unalias_dsname, zfs_alias_dsname, B_TRUE,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
 }
 
 static void
@@ -5670,68 +6378,86 @@ zfs_ioctl_init(void)
 {
 	zfs_ioctl_register("snapshot", ZFS_IOC_SNAPSHOT,
 	    zfs_ioc_snapshot, zfs_secpolicy_snapshot, POOL_NAME,
+	    zfs_unalias_snaps, zfs_alias_nvlkeys,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
 
 	zfs_ioctl_register("log_history", ZFS_IOC_LOG_HISTORY,
 	    zfs_ioc_log_history, zfs_secpolicy_log_history, NO_NAME,
+	    zfs_unalias_noop, zfs_alias_noop,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_FALSE);
 
 	zfs_ioctl_register("space_snaps", ZFS_IOC_SPACE_SNAPS,
 	    zfs_ioc_space_snaps, zfs_secpolicy_read, DATASET_NAME,
+	    zfs_unalias_firstsnap, zfs_alias_dsname,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE);
 
 	zfs_ioctl_register("send", ZFS_IOC_SEND_NEW,
 	    zfs_ioc_send_new, zfs_secpolicy_send_new, DATASET_NAME,
+	    zfs_unalias_fromsnap, zfs_alias_dsname,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE);
 
 	zfs_ioctl_register("send_space", ZFS_IOC_SEND_SPACE,
 	    zfs_ioc_send_space, zfs_secpolicy_read, DATASET_NAME,
+	    zfs_unalias_from, zfs_alias_dsname,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE);
 
 	zfs_ioctl_register("create", ZFS_IOC_CREATE,
 	    zfs_ioc_create, zfs_secpolicy_create_clone, DATASET_NAME,
-	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
+	    zfs_unalias_dsname, zfs_alias_dsname,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
+	    B_TRUE, B_TRUE);
 
 	zfs_ioctl_register("clone", ZFS_IOC_CLONE,
 	    zfs_ioc_clone, zfs_secpolicy_create_clone, DATASET_NAME,
-	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
+	    zfs_unalias_origin, zfs_alias_dsname,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
+	    B_TRUE, B_TRUE);
 
 	zfs_ioctl_register("destroy_snaps", ZFS_IOC_DESTROY_SNAPS,
 	    zfs_ioc_destroy_snaps, zfs_secpolicy_destroy_snaps, POOL_NAME,
-	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
+	    zfs_unalias_snaps, zfs_alias_nvlkeys,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY,
+	    B_TRUE, B_TRUE);
 
 	zfs_ioctl_register("hold", ZFS_IOC_HOLD,
 	    zfs_ioc_hold, zfs_secpolicy_hold, POOL_NAME,
+	    zfs_unalias_holds, zfs_alias_nvlkeys,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
 	zfs_ioctl_register("release", ZFS_IOC_RELEASE,
 	    zfs_ioc_release, zfs_secpolicy_release, POOL_NAME,
+	    zfs_unalias_nvlkeys, zfs_alias_nvlkeys,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
 
 	zfs_ioctl_register("get_holds", ZFS_IOC_GET_HOLDS,
 	    zfs_ioc_get_holds, zfs_secpolicy_read, DATASET_NAME,
+	    zfs_unalias_dsname, zfs_alias_dsname,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE);
 
 	zfs_ioctl_register("rollback", ZFS_IOC_ROLLBACK,
 	    zfs_ioc_rollback, zfs_secpolicy_rollback, DATASET_NAME,
+	    zfs_unalias_dsname, zfs_alias_dsname,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE);
 
 	zfs_ioctl_register("bookmark", ZFS_IOC_BOOKMARK,
 	    zfs_ioc_bookmark, zfs_secpolicy_bookmark, POOL_NAME,
+	    zfs_unalias_nvl, zfs_alias_nvlkeys,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
 
 	zfs_ioctl_register("get_bookmarks", ZFS_IOC_GET_BOOKMARKS,
 	    zfs_ioc_get_bookmarks, zfs_secpolicy_read, DATASET_NAME,
+	    zfs_unalias_dsname, zfs_alias_dsname,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE);
 
 	zfs_ioctl_register("destroy_bookmarks", ZFS_IOC_DESTROY_BOOKMARKS,
 	    zfs_ioc_destroy_bookmarks, zfs_secpolicy_destroy_bookmarks,
-	    POOL_NAME,
+	    POOL_NAME, zfs_unalias_nvlkeys, zfs_alias_nvlkeys,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE);
 
 	/* IOCTLS that use the legacy function signature */
 
 	zfs_ioctl_register_legacy(ZFS_IOC_POOL_FREEZE, zfs_ioc_pool_freeze,
-	    zfs_secpolicy_config, NO_NAME, B_FALSE, POOL_CHECK_READONLY);
+	    zfs_secpolicy_config, NO_NAME, zfs_unalias_poolname,
+	    zfs_alias_poolname, B_FALSE, POOL_CHECK_READONLY);
 
 	zfs_ioctl_register_pool(ZFS_IOC_POOL_CREATE, zfs_ioc_pool_create,
 	    zfs_secpolicy_config, B_TRUE, POOL_CHECK_NONE);
@@ -5782,9 +6508,9 @@ zfs_ioctl_init(void)
 	    zfs_secpolicy_config, B_FALSE, POOL_CHECK_NONE);
 
 	zfs_ioctl_register_pool(ZFS_IOC_POOL_STATS, zfs_ioc_pool_stats,
-	    zfs_secpolicy_read, B_FALSE, POOL_CHECK_NONE);
+	    zfs_secpolicy_read_pool, B_FALSE, POOL_CHECK_NONE);
 	zfs_ioctl_register_pool(ZFS_IOC_POOL_GET_PROPS, zfs_ioc_pool_get_props,
-	    zfs_secpolicy_read, B_FALSE, POOL_CHECK_NONE);
+	    zfs_secpolicy_read_pool, B_FALSE, POOL_CHECK_NONE);
 
 	zfs_ioctl_register_pool(ZFS_IOC_ERROR_LOG, zfs_ioc_error_log,
 	    zfs_secpolicy_inject, B_FALSE, POOL_CHECK_SUSPENDED);
@@ -5803,8 +6529,10 @@ zfs_ioctl_init(void)
 	zfs_ioctl_register_pool(ZFS_IOC_POOL_REOPEN, zfs_ioc_pool_reopen,
 	    zfs_secpolicy_config, B_TRUE, POOL_CHECK_SUSPENDED);
 
-	zfs_ioctl_register_dataset_read(ZFS_IOC_SPACE_WRITTEN,
-	    zfs_ioc_space_written);
+	zfs_ioctl_register_legacy(ZFS_IOC_SPACE_WRITTEN,
+	    zfs_ioc_space_written, zfs_secpolicy_read, DATASET_NAME,
+	    zfs_unalias_value, zfs_alias_value, B_FALSE,
+	    POOL_CHECK_SUSPENDED);
 	zfs_ioctl_register_dataset_read(ZFS_IOC_OBJSET_RECVD_PROPS,
 	    zfs_ioc_objset_recvd_props);
 	zfs_ioctl_register_dataset_read(ZFS_IOC_NEXT_OBJ,
@@ -5822,8 +6550,10 @@ zfs_ioctl_init(void)
 	zfs_ioctl_register_dataset_read(ZFS_IOC_SEND_PROGRESS,
 	    zfs_ioc_send_progress);
 
-	zfs_ioctl_register_dataset_read_secpolicy(ZFS_IOC_DIFF,
-	    zfs_ioc_diff, zfs_secpolicy_diff);
+	zfs_ioctl_register_legacy(ZFS_IOC_DIFF,
+	    zfs_ioc_diff, zfs_secpolicy_diff, DATASET_NAME,
+	    zfs_unalias_value, zfs_alias_value, B_FALSE,
+	    POOL_CHECK_SUSPENDED);
 	zfs_ioctl_register_dataset_read_secpolicy(ZFS_IOC_OBJ_TO_STATS,
 	    zfs_ioc_obj_to_stats, zfs_secpolicy_diff);
 	zfs_ioctl_register_dataset_read_secpolicy(ZFS_IOC_OBJ_TO_PATH,
@@ -5839,12 +6569,18 @@ zfs_ioctl_init(void)
 	    zfs_secpolicy_none);
 	zfs_ioctl_register_dataset_modify(ZFS_IOC_DESTROY, zfs_ioc_destroy,
 	    zfs_secpolicy_destroy);
-	zfs_ioctl_register_dataset_modify(ZFS_IOC_RENAME, zfs_ioc_rename,
-	    zfs_secpolicy_rename);
-	zfs_ioctl_register_dataset_modify(ZFS_IOC_RECV, zfs_ioc_recv,
-	    zfs_secpolicy_recv);
-	zfs_ioctl_register_dataset_modify(ZFS_IOC_PROMOTE, zfs_ioc_promote,
-	    zfs_secpolicy_promote);
+	zfs_ioctl_register_legacy(ZFS_IOC_RENAME, zfs_ioc_rename,
+	    zfs_secpolicy_rename, DATASET_NAME,
+	    zfs_unalias_value, zfs_alias_value,
+	    B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
+	zfs_ioctl_register_legacy(ZFS_IOC_RECV, zfs_ioc_recv,
+	    zfs_secpolicy_recv, DATASET_NAME,
+	    zfs_unalias_value, zfs_alias_value,
+	    B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
+	zfs_ioctl_register_legacy(ZFS_IOC_PROMOTE, zfs_ioc_promote,
+	    zfs_secpolicy_promote, DATASET_NAME,
+	    zfs_unalias_value, zfs_alias_string_value,
+	    B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
 	zfs_ioctl_register_dataset_modify(ZFS_IOC_INHERIT_PROP,
 	    zfs_ioc_inherit_prop, zfs_secpolicy_inherit_prop);
 	zfs_ioctl_register_dataset_modify(ZFS_IOC_SET_FSACL, zfs_ioc_set_fsacl,
@@ -6031,11 +6767,22 @@ zfsdev_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 			goto out;
 	}
 
-	/*
-	 * Ensure that all pool/dataset names are valid before we pass down to
-	 * the lower layers.
-	 */
+	/* Make certain zc_name is NULL-terminated. */
 	zc->zc_name[sizeof (zc->zc_name) - 1] = '\0';
+
+	/*
+	 * Non-global zones can have dataset aliases which need to be applied
+	 * before we pass down to lower layers.
+	 */
+	if (!INGLOBALZONE(curproc)) {
+		error = (*vec->zvec_unalias)(zc, &innvl, cr);
+		if (error != 0)
+			goto out;
+	}
+
+	/*
+	 * Ensure that all pool/dataset names are valid.
+	 */
 	switch (vec->zvec_namecheck) {
 	case POOL_NAME:
 		if (pool_namecheck(zc->zc_name, NULL, NULL) != 0)
@@ -6105,6 +6852,14 @@ zfsdev_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 		}
 		fnvlist_free(lognv);
 
+		/*
+		 * Successful return in non-global zone: alias anything in the
+		 * zc or outnvl that we need to before smush + copyout.
+		 */
+		if (error == 0 && !INGLOBALZONE(curproc)) {
+			error = (*vec->zvec_alias)(zc, &innvl, &outnvl, cr);
+		}
+
 		if (!nvlist_empty(outnvl) || zc->zc_nvlist_dst_size != 0) {
 			int smusherror = 0;
 			if (vec->zvec_smush_outnvlist) {
@@ -6121,6 +6876,15 @@ zfsdev_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 		nvlist_free(outnvl);
 	} else {
 		error = vec->zvec_legacy_func(zc);
+		/*
+		 * On successful returns to a non-global zone, make sure any
+		 * necessary un-aliasing we applied earlier to zc_name is
+		 * returned to the way it was before.
+		 */
+		if (error == 0 && !INGLOBALZONE(curproc)) {
+			nvlist_t *outnvl = NULL;
+			error = (*vec->zvec_alias)(zc, &innvl, &outnvl, cr);
+		}
 	}
 
 out:

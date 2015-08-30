@@ -379,6 +379,7 @@ typedef struct zone_ref {
  */
 typedef struct zone_dataset {
 	char		*zd_dataset;
+	char		*zd_alias;
 	list_node_t	zd_linkage;
 } zone_dataset_t;
 
@@ -942,8 +943,18 @@ extern int zone_ncpus_online_get(zone_t *);
 /*
  * Returns true if the named pool/dataset is visible in the current zone.
  */
-extern int zone_dataset_visible(const char *, int *);
-extern int zone_dataset_visible_inzone(zone_t *, const char *, int *);
+extern int zone_dataset_visible(const char *, int *, boolean_t);
+extern int zone_dataset_visible_inzone(zone_t *, const char *, int *,
+    boolean_t);
+
+/*
+ * Used to convert between a zone's local alias name for a dataset and
+ * the system's name.
+ */
+extern int zone_dataset_alias(const char *, char *, size_t);
+extern int zone_dataset_unalias(const char *, char *, size_t);
+extern int zone_dataset_alias_inzone(const char *, char *, size_t, zone_t *);
+extern int zone_dataset_unalias_inzone(const char *, char *, size_t, zone_t *);
 
 /*
  * zone version of kadmin()

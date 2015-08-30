@@ -565,7 +565,7 @@ typedef struct callb_cpr {
 	mutex_exit((cp)->cc_lockp);				\
 }
 
-#define	zone_dataset_visible(x, y)	(1)
+#define	zone_dataset_visible(x, y, z)	(1)
 #define	INGLOBALZONE(z)			(1)
 
 extern char *kmem_asprintf(const char *fmt, ...);

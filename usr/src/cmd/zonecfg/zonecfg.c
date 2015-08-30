@@ -244,6 +244,7 @@ char *prop_types[] = {
 	"global-nic",
 	"property",
 	"uuid",
+	"alias",
 	NULL
 };
 
@@ -1210,6 +1211,8 @@ usage(boolean_t verbose, uint_t flags)
 			(void) fprintf(fp, gettext("Valid commands:\n"));
 			(void) fprintf(fp, "\t%s %s=%s\n", cmd_to_str(CMD_SET),
 			    pt_to_str(PT_NAME), gettext("<name>"));
+			(void) fprintf(fp, "\t%s %s=%s\n", cmd_to_str(CMD_SET),
+			    pt_to_str(PT_ALIAS), gettext("<alias>"));
 			break;
 		case RT_DCPU:
 			(void) fprintf(fp, gettext("The '%s' resource scope "
@@ -1398,8 +1401,8 @@ usage(boolean_t verbose, uint_t flags)
 		(void) fprintf(fp, "\t%s\t\t%s, %s, %s\n", rt_to_str(RT_ATTR),
 		    pt_to_str(PT_NAME), pt_to_str(PT_TYPE),
 		    pt_to_str(PT_VALUE));
-		(void) fprintf(fp, "\t%s\t\t%s\n", rt_to_str(RT_DATASET),
-		    pt_to_str(PT_NAME));
+		(void) fprintf(fp, "\t%s\t\t%s, %s\n", rt_to_str(RT_DATASET),
+		    pt_to_str(PT_NAME), pt_to_str(PT_ALIAS));
 		(void) fprintf(fp, "\t%s\t%s, %s\n", rt_to_str(RT_DCPU),
 		    pt_to_str(PT_NCPUS), pt_to_str(PT_IMPORTANCE));
 		(void) fprintf(fp, "\t%s\t%s\n", rt_to_str(RT_PCAP),
@@ -2125,6 +2128,9 @@ export_func(cmd_t *cmd)
 		(void) fprintf(of, "%s %s\n", cmd_to_str(CMD_ADD),
 		    rt_to_str(RT_DATASET));
 		export_prop(of, PT_NAME, dstab.zone_dataset_name);
+		if (dstab.zone_dataset_alias[0] != '\0') {
+			export_prop(of, PT_ALIAS, dstab.zone_dataset_alias);
+		}
 		(void) fprintf(of, "%s\n", cmd_to_str(CMD_END));
 	}
 	(void) zonecfg_enddsent(handle);
@@ -3107,6 +3113,7 @@ fill_in_dstab(cmd_t *cmd, struct zone_dstab *dstab, boolean_t fill_in_only)
 		return (err);
 
 	dstab->zone_dataset_name[0] = '\0';
+	dstab->zone_dataset_alias[0] = '\0';
 	for (i = 0; i < cmd->cmd_prop_nv_pairs; i++) {
 		pp = cmd->cmd_property_ptr[i];
 		if (pp->pv_type != PROP_VAL_SIMPLE || pp->pv_simple == NULL) {
@@ -3118,6 +3125,10 @@ fill_in_dstab(cmd_t *cmd, struct zone_dstab *dstab, boolean_t fill_in_only)
 		case PT_NAME:
 			(void) strlcpy(dstab->zone_dataset_name, pp->pv_simple,
 			    sizeof (dstab->zone_dataset_name));
+			break;
+		case PT_ALIAS:
+			(void) strlcpy(dstab->zone_dataset_alias, pp->pv_simple,
+			    sizeof (dstab->zone_dataset_alias));
 			break;
 		default:
 			zone_perror(pt_to_str(cmd->cmd_prop_name[i]),
@@ -3931,6 +3942,13 @@ clear_property(cmd_t *cmd)
 	case RT_FS:
 		if (prop_type == PT_RAW) {
 			in_progress_fstab.zone_fs_raw[0] = '\0';
+			need_to_commit = B_TRUE;
+			return;
+		}
+		break;
+	case RT_DATASET:
+		if (prop_type == PT_ALIAS) {
+			in_progress_dstab.zone_dataset_alias[0] = '\0';
 			need_to_commit = B_TRUE;
 			return;
 		}
@@ -5015,6 +5033,11 @@ set_func(cmd_t *cmd)
 			    prop_id,
 			    sizeof (in_progress_dstab.zone_dataset_name));
 			return;
+		case PT_ALIAS:
+			(void) strlcpy(in_progress_dstab.zone_dataset_alias,
+			    prop_id,
+			    sizeof (in_progress_dstab.zone_dataset_alias));
+			return;
 		default:
 			break;
 		}
@@ -5698,6 +5721,7 @@ output_ds(FILE *fp, struct zone_dstab *dstab)
 {
 	(void) fprintf(fp, "%s:\n", rt_to_str(RT_DATASET));
 	output_prop(fp, PT_NAME, dstab->zone_dataset_name, B_TRUE);
+	output_prop(fp, PT_ALIAS, dstab->zone_dataset_alias, B_TRUE);
 }
 
 static void
@@ -5718,6 +5742,10 @@ info_ds(zone_dochandle_t handle, FILE *fp, cmd_t *cmd)
 		if (strlen(user.zone_dataset_name) > 0 &&
 		    strcmp(user.zone_dataset_name,
 		    lookup.zone_dataset_name) != 0)
+			continue;	/* no match */
+		if (strlen(user.zone_dataset_alias) > 0 &&
+		    strcmp(user.zone_dataset_alias,
+		    lookup.zone_dataset_alias) != 0)
 			continue;	/* no match */
 		output_ds(fp, &lookup);
 		output = B_TRUE;

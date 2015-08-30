@@ -146,9 +146,10 @@ extern "C" {
 #define	PT_GNIC		45
 #define	PT_NPROP	46
 #define	PT_UUID		47
+#define	PT_ALIAS	48
 
 #define	PT_MIN		PT_UNKNOWN
-#define	PT_MAX		PT_UUID
+#define	PT_MAX		PT_ALIAS
 
 #define	MAX_EQ_PROP_PAIRS	3
 

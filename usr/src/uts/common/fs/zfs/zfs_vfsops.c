@@ -1523,6 +1523,7 @@ out:
 static int
 zfs_mount(vfs_t *vfsp, vnode_t *mvp, struct mounta *uap, cred_t *cr)
 {
+	boolean_t	free_osname = B_FALSE;
 	char		*osname;
 	pathname_t	spn;
 	int		error = 0;
@@ -1557,7 +1558,23 @@ zfs_mount(vfs_t *vfsp, vnode_t *mvp, struct mounta *uap, cred_t *cr)
 	if (error = pn_get(uap->spec, fromspace, &spn))
 		return (error);
 
-	osname = spn.pn_path;
+
+	/*
+	 * Non-global zones can be configured to know a delegated dataset by
+	 * an alias, rather than the full objset name.
+	 */
+	if (!INGLOBALZONE(curproc)) {
+		free_osname = B_TRUE;
+		osname = kmem_alloc(MAXPATHLEN, KM_SLEEP);
+
+		if (zone_dataset_unalias(spn.pn_path, osname,
+		    MAXPATHLEN) != 0) {
+			error = SET_ERROR(EINVAL);
+			goto out;
+		}
+	} else {
+		osname = spn.pn_path;
+	}
 
 	/*
 	 * Check for mount privilege?
@@ -1595,8 +1612,8 @@ zfs_mount(vfs_t *vfsp, vnode_t *mvp, struct mounta *uap, cred_t *cr)
 	 * Refuse to mount a filesystem if we are in a local zone and the
 	 * dataset is not visible.
 	 */
-	if (!INGLOBALZONE(curproc) &&
-	    (!zone_dataset_visible(osname, &canwrite) || !canwrite)) {
+	if (!INGLOBALZONE(curproc) && (!zone_dataset_visible(osname,
+	    &canwrite, B_FALSE) || !canwrite)) {
 		error = SET_ERROR(EPERM);
 		goto out;
 	}
@@ -1626,6 +1643,9 @@ zfs_mount(vfs_t *vfsp, vnode_t *mvp, struct mounta *uap, cred_t *cr)
 		VFS_HOLD(mvp->v_vfsp);
 
 out:
+	if (free_osname) {
+		kmem_free(osname, MAXPATHLEN);
+	}
 	pn_free(&spn);
 	return (error);
 }

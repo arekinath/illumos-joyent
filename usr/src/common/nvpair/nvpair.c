@@ -1980,6 +1980,18 @@ nvlist_add_nvpair(nvlist_t *nvl, nvpair_t *nvp)
 	    NVP_NELEM(nvp), NVP_VALUE(nvp)));
 }
 
+#if defined(_KERNEL)
+int
+nvlist_add_named_nvpair(nvlist_t *nvl, const char *name, nvpair_t *nvp)
+{
+	if (nvl == NULL || nvp == NULL || name == NULL)
+		return (EINVAL);
+
+	return (nvlist_add_common(nvl, name, NVP_TYPE(nvp),
+	    NVP_NELEM(nvp), NVP_VALUE(nvp)));
+}
+#endif
+
 /*
  * Merge the supplied nvlists and put the result in dst.
  * The merged list will contain all names specified in both lists,

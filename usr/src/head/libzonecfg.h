@@ -253,6 +253,7 @@ struct zone_attrtab {
 
 struct zone_dstab {
 	char	zone_dataset_name[MAXNAMELEN];
+	char	zone_dataset_alias[MAXNAMELEN];
 };
 
 struct zone_psettab {

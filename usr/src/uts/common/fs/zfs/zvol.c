@@ -461,9 +461,19 @@ zil_replay_func_t *zvol_replay_vector[TX_MAX_TYPE] = {
 };
 
 int
-zvol_name2minor(const char *name, minor_t *minor)
+zvol_name2minor(const char *iname, minor_t *minor)
 {
 	zvol_state_t *zv;
+	int error;
+	const char *name = iname;
+	char namebuf[MAXPATHLEN];
+
+	if (!INGLOBALZONE(curproc)) {
+		error = zone_dataset_unalias(iname, namebuf, MAXPATHLEN);
+		if (error != 0)
+			return (error);
+		name = namebuf;
+	}
 
 	mutex_enter(&zfsdev_state_lock);
 	zv = zvol_minor_lookup(name);
@@ -477,8 +487,9 @@ zvol_name2minor(const char *name, minor_t *minor)
  * Create a minor node (plus a whole lot more) for the specified volume.
  */
 int
-zvol_create_minor(const char *name)
+zvol_create_minor(const char *iname)
 {
+
 	zfs_soft_state_t *zs;
 	zvol_state_t *zv;
 	objset_t *os;
@@ -486,6 +497,15 @@ zvol_create_minor(const char *name)
 	minor_t minor = 0;
 	char chrbuf[30], blkbuf[30];
 	int error;
+	char namebuf[MAXPATHLEN];
+	const char *name = iname;
+
+	if (!INGLOBALZONE(curproc)) {
+		error = zone_dataset_unalias(iname, namebuf, MAXPATHLEN);
+		if (error != 0)
+			return (error);
+		name = namebuf;
+	}
 
 	mutex_enter(&zfsdev_state_lock);
 

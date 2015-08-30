@@ -168,6 +168,9 @@ int nvlist_xdup(nvlist_t *, nvlist_t **, nv_alloc_t *);
 nv_alloc_t *nvlist_lookup_nv_alloc(nvlist_t *);
 
 int nvlist_add_nvpair(nvlist_t *, nvpair_t *);
+#if defined(_KERNEL)
+int nvlist_add_named_nvpair(nvlist_t *, const char *, nvpair_t *);
+#endif
 int nvlist_add_boolean(nvlist_t *, const char *);
 int nvlist_add_boolean_value(nvlist_t *, const char *, boolean_t);
 int nvlist_add_byte(nvlist_t *, const char *, uchar_t);

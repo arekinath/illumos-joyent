@@ -106,6 +106,7 @@
 
 #define	DTD_ATTR_ACTION		(const xmlChar *) "action"
 #define	DTD_ATTR_ADDRESS	(const xmlChar *) "address"
+#define	DTD_ATTR_ALIAS		(const xmlChar *) "alias"
 #define	DTD_ATTR_ALLOWED_ADDRESS	(const xmlChar *) "allowed-address"
 #define	DTD_ATTR_AUTOBOOT	(const xmlChar *) "autoboot"
 #define	DTD_ATTR_IPTYPE		(const xmlChar *) "ip-type"
@@ -6861,6 +6862,11 @@ zonecfg_add_ds_core(zone_dochandle_t handle, struct zone_dstab *tabptr)
 	if ((err = newprop(newnode, DTD_ATTR_NAME,
 	    tabptr->zone_dataset_name)) != Z_OK)
 		return (err);
+	if (tabptr->zone_dataset_alias[0] != '\0') {
+		if ((err = newprop(newnode, DTD_ATTR_ALIAS,
+		    tabptr->zone_dataset_alias)) != Z_OK)
+			return (err);
+	}
 	return (Z_OK);
 }
 
@@ -6891,7 +6897,9 @@ zonecfg_delete_ds_core(zone_dochandle_t handle, struct zone_dstab *tabptr)
 			continue;
 
 		if (match_prop(cur, DTD_ATTR_NAME,
-		    tabptr->zone_dataset_name)) {
+		    tabptr->zone_dataset_name) &&
+		    match_prop(cur, DTD_ATTR_ALIAS,
+		    tabptr->zone_dataset_alias)) {
 			xmlUnlinkNode(cur);
 			xmlFreeNode(cur);
 			return (Z_OK);
@@ -6946,6 +6954,7 @@ zonecfg_lookup_ds(zone_dochandle_t handle, struct zone_dstab *tabptr)
 	xmlNodePtr cur, firstmatch;
 	int err;
 	char dataset[MAXNAMELEN];
+	char alias[MAXNAMELEN];
 
 	if (tabptr == NULL)
 		return (Z_INVAL);
@@ -6969,6 +6978,25 @@ zonecfg_lookup_ds(zone_dochandle_t handle, struct zone_dstab *tabptr)
 					return (Z_INSUFFICIENT_SPEC);
 			}
 		}
+		if (strlen(tabptr->zone_dataset_alias) > 0) {
+			if ((fetchprop(cur, DTD_ATTR_ALIAS, alias,
+			    sizeof (alias)) == Z_OK)) {
+				if (strcmp(tabptr->zone_dataset_alias,
+				    alias) == 0) {
+					if (firstmatch == NULL)
+						firstmatch = cur;
+					else if (firstmatch != cur)
+						return (Z_INSUFFICIENT_SPEC);
+				} else {
+					/*
+					 * If another property matched but this
+					 * one doesn't then reset firstmatch.
+					 */
+					if (firstmatch == cur)
+						firstmatch = NULL;
+				}
+			}
+		}
 	}
 	if (firstmatch == NULL)
 		return (Z_NO_RESOURCE_ID);
@@ -6977,6 +7005,9 @@ zonecfg_lookup_ds(zone_dochandle_t handle, struct zone_dstab *tabptr)
 
 	if ((err = fetchprop(cur, DTD_ATTR_NAME, tabptr->zone_dataset_name,
 	    sizeof (tabptr->zone_dataset_name))) != Z_OK)
+		return (err);
+	if ((err = fetchprop(cur, DTD_ATTR_ALIAS, tabptr->zone_dataset_alias,
+	    sizeof (tabptr->zone_dataset_alias))) != Z_OK)
 		return (err);
 
 	return (Z_OK);
@@ -7010,6 +7041,11 @@ zonecfg_getdsent(zone_dochandle_t handle, struct zone_dstab *tabptr)
 
 	if ((err = fetchprop(cur, DTD_ATTR_NAME, tabptr->zone_dataset_name,
 	    sizeof (tabptr->zone_dataset_name))) != Z_OK) {
+		handle->zone_dh_cur = handle->zone_dh_top;
+		return (err);
+	}
+	if ((err = fetchprop(cur, DTD_ATTR_ALIAS, tabptr->zone_dataset_alias,
+	    sizeof (tabptr->zone_dataset_alias))) != Z_OK) {
 		handle->zone_dh_cur = handle->zone_dh_top;
 		return (err);
 	}

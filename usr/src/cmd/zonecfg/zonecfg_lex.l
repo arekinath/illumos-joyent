@@ -62,7 +62,7 @@ static char *create_token(char *s);
 %p 5000
 %e 2000
 %n 1000
-%o 13000
+%o 14000
 
 %{
 /*
@@ -327,6 +327,8 @@ static char *create_token(char *s);
 
 <TSTATE>zfs-io-priority	{ return ZFSPRI; }
 <CSTATE>zfs-io-priority	{ return ZFSPRI; }
+
+<TSTATE>alias		{ return ALIAS; }
 
 <TSTATE>=	{ return EQUAL; }
 <LSTATE>=	{ return EQUAL; }
