@@ -965,13 +965,14 @@ lx_zone_get_zvols(zone_t *zone, ldi_handle_t lh, minor_t *emul_minor)
 			    strchr(zc->zc_name, '%') != NULL)
 				continue;
 
-			if (!zone_dataset_visible_inzone(zone, zc->zc_name, &w))
+			if (!zone_dataset_visible_inzone(zone, zc->zc_name, &w,
+			    B_TRUE))
 				continue;
 
 			if (zc->zc_objset_stats.dds_type == DMU_OST_ZVOL) {
 				lx_virt_disk_t *vd;
 				minor_t m = 0;
-				char *znm = zc->zc_name;
+				char *znm;
 
 				/* Create a virtual disk entry for the zvol */
 				vd = kmem_zalloc(sizeof (lx_virt_disk_t),
@@ -980,9 +981,12 @@ lx_zone_get_zvols(zone_t *zone, ldi_handle_t lh, minor_t *emul_minor)
 				(void) snprintf(vd->lxvd_name,
 				    sizeof (vd->lxvd_name),
 				    "zvol%u", devnum++);
-				(void) strlcpy(vd->lxvd_real_name,
-				    zc->zc_name,
-				    sizeof (vd->lxvd_real_name));
+				rc = zone_dataset_alias_inzone(zc->zc_name,
+				    vd->lxvd_real_name,
+				    sizeof (vd->lxvd_real_name), zone);
+				if (rc != 0)
+					continue;
+				znm = vd->lxvd_real_name;
 
 				/* Record emulated and real dev_t values */
 				vd->lxvd_emul_dev = makedevice(LX_MAJOR_DISK,
