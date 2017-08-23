@@ -270,6 +270,13 @@ zio_data_buf_free(void *buf, size_t size)
 	kmem_cache_free(zio_data_buf_cache[c], buf);
 }
 
+/* ARGSUSED */
+static void
+zio_abd_free(void *abd, size_t size)
+{
+	abd_free((abd_t *)abd);
+}
+
 /*
  * ==========================================================================
  * Push and pop I/O transform buffers
@@ -3344,14 +3351,14 @@ zio_vsd_default_cksum_finish(zio_cksum_report_t *zcr,
 void
 zio_vsd_default_cksum_report(zio_t *zio, zio_cksum_report_t *zcr, void *ignored)
 {
-	void *buf = zio_buf_alloc(zio->io_size);
+	void *abd = abd_alloc_sametype(zio->io_abd, zio->io_size);
 
-	abd_copy_to_buf(buf, zio->io_abd, zio->io_size);
+	abd_copy(abd, zio->io_abd, zio->io_size);
 
 	zcr->zcr_cbinfo = zio->io_size;
-	zcr->zcr_cbdata = buf;
+	zcr->zcr_cbdata = abd;
 	zcr->zcr_finish = zio_vsd_default_cksum_finish;
-	zcr->zcr_free = zio_buf_free;
+	zcr->zcr_free = zio_abd_free;
 }
 
 static int
