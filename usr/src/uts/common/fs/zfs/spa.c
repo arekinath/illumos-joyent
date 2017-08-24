@@ -3609,7 +3609,7 @@ spa_create_check_encryption_params(dsl_crypto_params_t *dcp,
 	    !has_encryption)
 		return (SET_ERROR(ENOTSUP));
 
-	return (dmu_objset_create_crypt_check(NULL, dcp));
+	return (dmu_objset_create_crypt_check(NULL, dcp, DMU_OST_META));
 }
 
 /*
