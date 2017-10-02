@@ -1219,7 +1219,7 @@ snprintf_blkptr_compact(char *blkbuf, size_t buflen, const blkptr_t *bp)
 	}
 
 	blkbuf[0] = '\0';
-	for (int i = 0; i < ndvas; i++)
+	for (unsigned int i = 0; i < ndvas; i++)
 		(void) snprintf(blkbuf + strlen(blkbuf),
 		    buflen - strlen(blkbuf), "%llu:%llx:%llx ",
 		    (u_longlong_t)DVA_GET_VDEV(&dva[i]),
