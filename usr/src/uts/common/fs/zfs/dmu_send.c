@@ -2708,8 +2708,6 @@ receive_spill(struct receive_writer_arg *rwa, struct drr_spill *drrs,
 	if (drrs->drr_length < SPA_MINBLOCKSIZE ||
 	    drrs->drr_length > spa_maxblocksize(dmu_objset_spa(rwa->os)))
 		return (SET_ERROR(EINVAL));
-	if (rwa->raw)
-		return (SET_ERROR(EINVAL));
 
 	if (rwa->raw) {
 		if (!DMU_OT_IS_VALID(drrs->drr_type) ||

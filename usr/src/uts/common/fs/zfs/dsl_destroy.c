@@ -828,8 +828,7 @@ dsl_destroy_head_sync_impl(dsl_dataset_t *ds, dmu_tx_t *tx)
 	objset_t *os;
 	VERIFY0(dmu_objset_from_ds(ds, &os));
 
-	if (!spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_ASYNC_DESTROY) ||
-	    os->os_encrypted) {
+	if (!spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_ASYNC_DESTROY)) {
 		old_synchronous_dataset_destroy(ds, tx);
 	} else {
 		/*

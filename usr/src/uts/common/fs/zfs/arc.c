@@ -6327,6 +6327,8 @@ arc_write_ready(zio_t *zio)
 	HDR_SET_PSIZE(hdr, psize);
 	arc_hdr_set_compress(hdr, compress);
 
+	if (zio->io_error != 0 || psize == 0)
+		goto out;
 
 	/*
 	 * Fill the hdr with data. If the buffer is encrypted we have no choice
@@ -6343,6 +6345,7 @@ arc_write_ready(zio_t *zio)
 	 * the data into it; otherwise, we share the data directly if we can.
 	 */
 	if (ARC_BUF_ENCRYPTED(buf)) {
+		ASSERT3U(psize, >, 0);
 		ASSERT(ARC_BUF_COMPRESSED(buf));
 		arc_hdr_alloc_pabd(hdr, B_TRUE);
 		abd_copy(hdr->b_crypt_hdr.b_rabd, zio->io_abd, psize);
@@ -6374,6 +6377,7 @@ arc_write_ready(zio_t *zio)
 		arc_share_buf(hdr, buf);
 	}
 
+out:
 	arc_hdr_verify(hdr, zio->io_bp);
 }
 
@@ -6529,14 +6533,6 @@ arc_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, arc_buf_t *buf,
 		zio_flags |= ZIO_FLAG_RAW_COMPRESS;
 	}
 
-	if (ARC_BUF_ENCRYPTED(buf)) {
-		ASSERT(ARC_BUF_COMPRESSED(buf));
-		zio_flags |= ZIO_FLAG_RAW;
-	} else if (ARC_BUF_COMPRESSED(buf)) {
-		ASSERT3U(zp->zp_compress, !=, ZIO_COMPRESS_OFF);
-		ASSERT3U(HDR_GET_LSIZE(hdr), !=, arc_buf_size(buf));
-		zio_flags |= ZIO_FLAG_RAW_COMPRESS;
-	}
 	callback = kmem_zalloc(sizeof (arc_write_callback_t), KM_SLEEP);
 	callback->awcb_ready = ready;
 	callback->awcb_children_ready = children_ready;
