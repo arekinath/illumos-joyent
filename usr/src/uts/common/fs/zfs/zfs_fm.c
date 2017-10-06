@@ -784,7 +784,7 @@ zfs_ereport_send_interim_checksum(zio_cksum_report_t *report)
 void
 zfs_ereport_post_checksum(spa_t *spa, vdev_t *vd, zbookmark_phys_t *zb,
     struct zio *zio, uint64_t offset, uint64_t length,
-    const void *good_data, const void *bad_data, zio_bad_cksum_t *zbc)
+    const abd_t *good_data, const abd_t *bad_data, zio_bad_cksum_t *zbc)
 {
 #ifdef _KERNEL
 	nvlist_t *ereport = NULL;
