@@ -266,6 +266,7 @@ hat_alloc(struct as *as)
 	hat->hat_as = as;
 	mutex_init(&hat->hat_mutex, NULL, MUTEX_DEFAULT, NULL);
 	ASSERT(hat->hat_flags == 0);
+	HATSTAT_INC(hs_hat_alloc);
 
 #if defined(__xpv)
 	/*
@@ -298,6 +299,12 @@ hat_alloc(struct as *as)
 		hat->hat_ht_hash = kmem_cache_alloc(hat_hash_cache, KM_SLEEP);
 	}
 	bzero(hat->hat_ht_hash, hat->hat_num_hash * sizeof (htable_t *));
+
+	/*
+	 * Always initialize the hat_user_ptable to PFN_INVALID. If it needs to
+	 * be allocated, then htable_create() will take care of doing so.
+	 */
+	hat->hat_user_ptable = PFN_INVALID;
 
 	/*
 	 * Initialize Kernel HAT entries at the top of the top level page
@@ -356,9 +363,9 @@ init_done:
 	 * Pin top level page tables after initializing them
 	 */
 	xen_pin(hat->hat_htable->ht_pfn, mmu.max_level);
-#if defined(__amd64)
-	xen_pin(hat->hat_user_ptable, mmu.max_level);
-#endif
+	if (hat->hat_user_ptable != PFN_INVALID) {
+		xen_pin(hat->hat_user_ptable, mmu.max_level);
+	}
 #endif
 	XPV_ALLOW_MIGRATE();
 
@@ -383,6 +390,12 @@ init_done:
 		kas.a_hat->hat_prev = hat;
 	kas.a_hat->hat_next = hat;
 	mutex_exit(&hat_list_lock);
+
+#ifdef	DEBUG
+	if (hat->hat_user_ptable != PFN_INVALID) {
+		HATSTAT_INC(hs_hat_ualloc);
+	}
+#endif
 
 	return (hat);
 }
@@ -443,9 +456,9 @@ hat_free_end(hat_t *hat)
 	 * On the hypervisor, unpin top level page table(s)
 	 */
 	xen_unpin(hat->hat_htable->ht_pfn);
-#if defined(__amd64)
-	xen_unpin(hat->hat_user_ptable);
-#endif
+	if (hat->hat_user_ptable != PFN_INVALID) {
+		xen_unpin(hat->hat_user_ptable);
+	}
 #endif
 
 	/*
@@ -464,6 +477,8 @@ hat_free_end(hat_t *hat)
 	hat->hat_ht_hash = NULL;
 
 	hat->hat_flags = 0;
+	ASSERT3U(hat->hat_user_ptable, ==, PFN_INVALID);
+	HATSTAT_INC(hs_hat_free);
 	kmem_cache_free(hat_cache, hat);
 }
 
@@ -677,6 +692,16 @@ mmu_init(void)
 	while (mmu.hash_cnt * HASH_MAX_LENGTH < max_htables)
 		mmu.hash_cnt <<= 1;
 #endif
+
+	/*
+	 * The 64-bit XEN hypervisor always operates with split user/kernel page
+	 * tables. However, other systems do not.
+	 */
+#if defined(__amd64) && defined(__xpv)
+	mmu.mmu_split_ptables = B_TRUE;
+#else
+	mmu.mmu_split_ptables = cpuid_is_speculation_broken();
+#endif
 }
 
 
@@ -772,9 +797,11 @@ hat_init()
 /*
  * Prepare CPU specific pagetables for VLP processes on 64 bit kernels.
  *
- * Each CPU has a set of 2 pagetables that are reused for any 32 bit
- * process it runs. They are the top level pagetable, hci_vlp_l3ptes, and
- * the next to top level table for the bottom 512 Gig, hci_vlp_l2ptes.
+ * Each CPU has a set of 3 pagetables that are reused for any 32 bit
+ * process it runs. They are the top level pagetable, hci_vlp_l3ptes_kern, and
+ * the next to top level table for the bottom 512 Gig, hci_vlp_l2ptes. The third
+ * pagetable is a duplicate of hci_vlp_l3ptes_kern, hci_vlp_l3ptes_user.
+ * However, unlike the kernel version, it doesn't have the kernel mapped in.
  */
 /*ARGSUSED*/
 static void
@@ -783,6 +810,7 @@ hat_vlp_setup(struct cpu *cpu)
 #if defined(__amd64) && !defined(__xpv)
 	struct hat_cpu_info *hci = cpu->cpu_hat_info;
 	pfn_t pfn;
+	void *l3pte;
 
 	/*
 	 * allocate the level==2 page table for the bottom most
@@ -795,15 +823,29 @@ hat_vlp_setup(struct cpu *cpu)
 	 * Allocate a top level pagetable and copy the kernel's
 	 * entries into it. Then link in hci_vlp_l2ptes in the 1st entry.
 	 */
-	hci->hci_vlp_l3ptes = kmem_zalloc(MMU_PAGESIZE, KM_SLEEP);
-	hci->hci_vlp_pfn =
-	    hat_getpfnum(kas.a_hat, (caddr_t)hci->hci_vlp_l3ptes);
-	ASSERT(hci->hci_vlp_pfn != PFN_INVALID);
-	bcopy(vlp_page, hci->hci_vlp_l3ptes, MMU_PAGESIZE);
+	hci->hci_vlp_l3ptes_kern = kmem_zalloc(MMU_PAGESIZE, KM_SLEEP);
+	hci->hci_vlp_pfn_kern =
+	    hat_getpfnum(kas.a_hat, (caddr_t)hci->hci_vlp_l3ptes_kern);
+	ASSERT(hci->hci_vlp_pfn_kern != PFN_INVALID);
+	bcopy(vlp_page, hci->hci_vlp_l3ptes_kern, MMU_PAGESIZE);
+
+	/* XXX Come back here and set up the shared mapping for the trampoline,
+	 * etc. */
 
 	pfn = hat_getpfnum(kas.a_hat, (caddr_t)hci->hci_vlp_l2ptes);
 	ASSERT(pfn != PFN_INVALID);
-	hci->hci_vlp_l3ptes[0] = MAKEPTP(pfn, 2);
+	hci->hci_vlp_l3ptes_kern[0] = MAKEPTP(pfn, 2);
+
+	if (mmu.mmu_split_ptables > 0) {
+		hci->hci_vlp_l3ptes_user = kmem_zalloc(MMU_PAGESIZE, KM_SLEEP);
+		hci->hci_vlp_pfn_user =
+		    hat_getpfnum(kas.a_hat, (caddr_t)hci->hci_vlp_l3ptes_user);
+		ASSERT(hci->hci_vlp_pfn_user != PFN_INVALID);
+		hci->hci_vlp_l3ptes_user[0] = MAKEPTP(pfn, 2);
+	} else {
+		hci->hci_vlp_l3ptes_user = NULL;
+		hci->hci_vlp_pfn_user = PFN_INVALID;
+	}
 #endif /* __amd64 && !__xpv */
 }
 
@@ -818,8 +860,10 @@ hat_vlp_teardown(cpu_t *cpu)
 		return;
 	if (hci->hci_vlp_l2ptes)
 		kmem_free(hci->hci_vlp_l2ptes, MMU_PAGESIZE);
-	if (hci->hci_vlp_l3ptes)
-		kmem_free(hci->hci_vlp_l3ptes, MMU_PAGESIZE);
+	if (hci->hci_vlp_l3ptes_kern)
+		kmem_free(hci->hci_vlp_l3ptes_kern, MMU_PAGESIZE);
+	if (hci->hci_vlp_l3ptes_user)
+		kmem_free(hci->hci_vlp_l3ptes_user, MMU_PAGESIZE);
 #endif
 }
 
@@ -1015,7 +1059,10 @@ hat_switch(hat_t *hat)
 		x86pte_t *vlpptep = cpu->cpu_hat_info->hci_vlp_l2ptes;
 
 		VLP_COPY(hat->hat_vlp_ptes, vlpptep);
-		newcr3 = MAKECR3(cpu->cpu_hat_info->hci_vlp_pfn);
+		/*
+		 * XXX Figure out how we should track which PTE we should be on
+		 */
+		newcr3 = MAKECR3(cpu->cpu_hat_info->hci_vlp_pfn_kern);
 #elif defined(__i386)
 		reload_pae32(hat, cpu);
 		newcr3 = MAKECR3(kas.a_hat->hat_htable->ht_pfn) +

@@ -94,9 +94,7 @@ struct hat {
 	htable_t	**hat_ht_hash;	/* htable hash buckets */
 	htable_t	*hat_ht_cached;	/* cached free htables */
 	x86pte_t	hat_vlp_ptes[VLP_NUM_PTES];
-#if defined(__amd64) && defined(__xpv)
 	pfn_t		hat_user_ptable; /* alt top ptable for user mode */
-#endif
 };
 typedef struct hat hat_t;
 
@@ -155,6 +153,9 @@ struct hatstats {
 	ulong_t	hs_hm_steals;
 	ulong_t	hs_hm_steal_exam;
 	ulong_t hs_tlb_inval_delayed;
+	ulong_t hs_hat_alloc;		/* total hats alloced */
+	ulong_t hs_hat_ualloc;		/* total hats with user page alloc */
+	ulong_t hs_hat_free;		/* total hats freed */
 };
 extern struct hatstats hatstat;
 #ifdef DEBUG

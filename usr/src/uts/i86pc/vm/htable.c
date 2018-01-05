@@ -64,6 +64,7 @@
 #include <vm/kboot_mmu.h>
 
 static void x86pte_zero(htable_t *dest, uint_t entry, uint_t count);
+static void x86pte_zero_user(hat_t *hat);
 
 kmem_cache_t *htable_cache;
 
@@ -667,13 +668,13 @@ htable_steal(uint_t cnt, boolean_t reap)
 				if (ht->ht_hat == NULL)
 					continue;
 				ASSERT(ht->ht_hat == hat);
-#if defined(__xpv) && defined(__amd64)
 				if (!(ht->ht_flags & HTABLE_VLP) &&
-				    ht->ht_level == mmu.max_level) {
+				    ht->ht_level == mmu.max_level &&
+				    hat->hat_user_ptable != PFN_INVALID) {
 					ptable_free(hat->hat_user_ptable);
 					hat->hat_user_ptable = PFN_INVALID;
 				}
-#endif
+
 				/*
 				 * forget the hat
 				 */
@@ -783,6 +784,7 @@ htable_alloc(
 	uint_t		is_bare = 0;
 	uint_t		need_to_zero = 1;
 	int		kmflags = (can_steal_post_boot ? KM_NOSLEEP : KM_SLEEP);
+	boolean_t	do_user = B_FALSE;
 
 	if (level < 0 || level > TOP_LEVEL(hat))
 		panic("htable_alloc(): level %d out of range\n", level);
@@ -886,17 +888,18 @@ htable_alloc(
 	if (ht == NULL)
 		panic("htable_alloc(): couldn't steal\n");
 
-#if defined(__amd64) && defined(__xpv)
 	/*
-	 * Under the 64-bit hypervisor, we have 2 top level page tables.
-	 * If this allocation fails, we'll resort to stealing.
-	 * We use the stolen page indirectly, by freeing the
+	 * If we've been configured to run with split page tables (whether for
+	 * 64-bit Xen or because speculation is broken) then we have two top
+	 * level page tables. If this allocation fails, we'll resort to
+	 * stealing. We use the stolen page indirectly, by freeing the
 	 * stolen htable first.
 	 */
-	if (level == mmu.max_level) {
+	if (level == mmu.max_level && mmu.mmu_split_ptables > 0 && !is_vlp) {
 		for (;;) {
 			htable_t *stolen;
 
+			ASSERT3U(hat->hat_user_ptable, ==, PFN_INVALID);
 			hat->hat_user_ptable = ptable_alloc((uintptr_t)ht + 1);
 			if (hat->hat_user_ptable != PFN_INVALID)
 				break;
@@ -905,10 +908,9 @@ htable_alloc(
 				panic("2nd steal ptable failed\n");
 			htable_free(stolen);
 		}
-		block_zero_no_xmm(kpm_vbase + pfn_to_pa(hat->hat_user_ptable),
-		    MMU_PAGESIZE);
+
+		x86pte_zero_user(hat);
 	}
-#endif
 
 	/*
 	 * Shared page tables have all entries locked and entries may not
@@ -934,7 +936,8 @@ htable_alloc(
 	 */
 	if (is_vlp) {
 		ht->ht_flags |= HTABLE_VLP;
-		ASSERT(ht->ht_pfn == PFN_INVALID);
+		ASSERT3U(ht->ht_pfn, ==, PFN_INVALID);
+		ASSERT3U(hat->hat_user_ptable, ==, PFN_INVALID);
 		need_to_zero = 0;
 	}
 
@@ -1001,12 +1004,11 @@ htable_free(htable_t *ht)
 		ASSERT(ht->ht_pfn != PFN_INVALID);
 	} else if (!(ht->ht_flags & HTABLE_VLP)) {
 		ptable_free(ht->ht_pfn);
-#if defined(__amd64) && defined(__xpv)
-		if (ht->ht_level == mmu.max_level && hat != NULL) {
+		if (ht->ht_level == mmu.max_level && hat != NULL &&
+		    hat->hat_user_ptable != PFN_INVALID) {
 			ptable_free(hat->hat_user_ptable);
 			hat->hat_user_ptable = PFN_INVALID;
 		}
-#endif
 	}
 	ht->ht_pfn = PFN_INVALID;
 
@@ -1117,6 +1119,10 @@ unlink_ptp(htable_t *higher, htable_t *old, uintptr_t vaddr)
 	 * If we don't need do do that, then we still have to INVLPG against
 	 * an address covered by the inner page table, as the latest processors
 	 * have TLB-like caches for non-leaf page table entries.
+	 *
+	 * XXX Does this cover the case for both the user/kernel structure? My
+	 * current read of 4.10.4.1 Operations that Invalidate TLBs and
+	 * Paging-Structure Caches says that this should be sufficient for both.
 	 */
 	if (!(hat->hat_flags & HAT_FREEING)) {
 		hat_tlb_inval(hat, (higher->ht_flags & HTABLE_VLP) ?
@@ -1947,7 +1953,7 @@ x86pte_access_pagetable(htable_t *ht, uint_t index)
 	 */
 	if (ht->ht_flags & HTABLE_VLP)
 		return (PT_INDEX_PTR(ht->ht_hat->hat_vlp_ptes, index));
-	return (x86pte_mapin(ht->ht_pfn, index, ht));
+	return (x86pte_mapin(ht->ht_pfn, index, NULL));
 }
 
 /*
@@ -2219,6 +2225,29 @@ x86pte_cas(htable_t *ht, uint_t entry, x86pte_t old, x86pte_t new)
 	pte = CAS_PTE(ptep, old, new);
 	XPV_DISALLOW_PAGETABLE_UPDATES();
 	x86pte_release_pagetable(ht);
+
+	/*
+	 * If this is a top level page table, we have a user shadow table, and
+	 * the effective address is a user address, then we must update the
+	 * secondary page table as well. We perform the exact same CAS. However,
+	 * as we exepct these to always be in sync, we do not return the value.
+	 */
+	if (ht->ht_level == mmu.max_level && ht->ht_hat != NULL &&
+	    ht->ht_hat != kas.a_hat &&
+	    ht->ht_hat->hat_user_ptable != PFN_INVALID &&
+	    htable_e2va(ht, entry) < kernelbase) {
+		ptep = x86pte_mapin(ht->ht_hat->hat_user_ptable, entry, NULL);
+		XPV_ALLOW_PAGETABLE_UPDATES();
+#ifdef DEBUG
+		x86pte_t altpte = CAS_PTE(ptep, old, new);
+		VERIFY3U(altpte, ==, pte);
+#else
+		(void) CAS_PTE(ptep, old, new);
+#endif
+		XPV_DISALLOW_PAGETABLE_UPDATES();
+		x86pte_mapout();
+	}
+
 	return (pte);
 }
 
@@ -2347,6 +2376,10 @@ x86pte_update(
  * Copy page tables - this is just a little more complicated than the
  * previous routines. Note that it's also not atomic! It also is never
  * used for VLP pagetables.
+ *
+ * Today this function is only used to copy the kernel's page tables into a user
+ * hat. If we ever use this function to copy user pages, then this must be
+ * modified to set entries in the user pte as required.
  */
 void
 x86pte_copy(htable_t *src, htable_t *dest, uint_t entry, uint_t count)
@@ -2486,6 +2519,58 @@ x86pte_zero(htable_t *dest, uint_t entry, uint_t count)
 	} else
 #endif
 		x86pte_release_pagetable(dest);
+}
+
+/*
+ * Similar to x86pte_zero(); however, explicitly zero the top level page table
+ * that is used for the user page. We don't have an htable to base this off. We
+ * rely on the fact that we know that VLP pages aren't being used and therefore
+ * can bypass using x86pte_acquire_pagetable and use the underlying mapin and
+ * mapout functions.
+ */
+static void
+x86pte_zero_user(hat_t *hat)
+{
+	caddr_t dst_va;
+	size_t size;
+#ifdef __xpv
+	int x;
+	x86pte_t newpte;
+#endif
+
+	VERIFY3U(hat->hat_user_ptable, !=, PFN_INVALID);
+	VERIFY3S(hat->hat_flags & HAT_VLP, ==, 0);
+
+#ifdef __xpv
+	if (kpm_vbase == NULL) {
+		kpreempt_disable();
+		ASSERT(CPU->cpu_hat_info != NULL);
+		mutex_enter(&CPU->cpu_hat_info->hci_mutex);
+		x = PWIN_TABLE(CPU->cpu_id);
+		newpte = MAKEPTE(hat->hat_user_ptable, 0) | PT_WRITABLE;
+		xen_map(newpte, PWIN_VA(x));
+		dst_va = (caddr_t)PT_INDEX_PTR(PWIN_VA(x), entry);
+	} else
+#endif
+		dst_va = (caddr_t)x86pte_mapin(hat->hat_user_ptable, 0, NULL);
+
+#ifdef __i386
+	if (!is_x86_feature(x86_featureset, X86FSET_SSE2))
+		bzero(dst_va, MMU_PAGESIZE);
+	else
+#endif
+		block_zero_no_xmm(dst_va, MMU_PAGESIZE);
+
+
+#ifdef __xpv
+	if (kpm_vbase == NULL) {
+		xen_map(0, PWIN_VA(x));
+		mutex_exit(&CPU->cpu_hat_info->hci_mutex);
+		kpreempt_enable();
+	} else
+#endif
+		x86pte_mapout();
+
 }
 
 /*

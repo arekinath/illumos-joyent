@@ -211,6 +211,11 @@ struct hat_mmu_info {
 	uintptr_t level_size[MAX_NUM_LEVEL];	/* PAGESIZE for given level */
 	uintptr_t level_offset[MAX_NUM_LEVEL];	/* PAGEOFFSET for given level */
 	uintptr_t level_mask[MAX_NUM_LEVEL];	/* PAGEMASK for given level */
+
+	/*
+	 * Should user/kernel page tables be split into two different roots?
+	 */
+	uint_t mmu_split_ptables;
 };
 
 

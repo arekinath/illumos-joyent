@@ -111,8 +111,10 @@ typedef struct htable htable_t;
 struct hat_cpu_info {
 	kmutex_t hci_mutex;		/* mutex to ensure sequential usage */
 #if defined(__amd64)
-	pfn_t	hci_vlp_pfn;		/* pfn of hci_vlp_l3ptes */
-	x86pte_t *hci_vlp_l3ptes;	/* VLP Level==3 pagetable (top) */
+	pfn_t	hci_vlp_pfn_kern;		/* pfn of hci_vlp_l3ptes_kern */
+	pfn_t	hci_vlp_pfn_user;		/* pfn of hci_vlp_l3ptes_user */
+	x86pte_t *hci_vlp_l3ptes_kern;	/* VLP Level==3 pagetable (top) */
+	x86pte_t *hci_vlp_l3ptes_user;	/* VLP Level==3 pagetable (top) */
 	x86pte_t *hci_vlp_l2ptes;	/* VLP Level==2 pagetable */
 #endif	/* __amd64 */
 };

@@ -821,6 +821,8 @@ extern void cpuid_pass4(struct cpu *, uint_t *);
 extern void cpuid_set_cpu_properties(void *, processorid_t,
     struct cpuid_info *);
 
+extern boolean_t cpuid_is_speculation_broken(void);
+
 extern void cpuid_get_addrsize(struct cpu *, uint_t *, uint_t *);
 extern uint_t cpuid_get_dtlb_nent(struct cpu *, size_t);
 

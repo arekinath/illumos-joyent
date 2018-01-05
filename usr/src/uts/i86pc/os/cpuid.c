@@ -124,6 +124,13 @@ uint_t x86_clflush_size = 0;
 
 uint_t pentiumpro_bug4046376;
 
+/*
+ * Override whether or not we think speculation is broken on this CPU. Set to
+ * zero to indicate it works. Set to one to indicate it's broken. Any other
+ * value is ignored.
+ */
+uint_t x86_override_spec_broken = UINT_MAX;
+
 uchar_t x86_featureset[BT_SIZEOFMAP(NUM_X86_FEATURES)];
 
 static char *x86_feature_names[NUM_X86_FEATURES] = {
@@ -5209,4 +5216,66 @@ cpuid_get_ext_topo(uint_t vendor, uint_t *core_nbits, uint_t *strand_nbits)
 			}
 		}
 	}
+}
+
+boolean_t
+cpuid_is_speculation_broken(void)
+{
+	struct cpuid_info *cpi = &cpuid_info0;
+
+	VERIFY3U(cpi->cpi_pass, >=, 1);
+
+	/*
+	 * If the override has been set, then honor it. Even if it doesn't make
+	 * sense.
+	 */
+	switch (x86_override_spec_broken) {
+	case 0:
+		return (B_FALSE);
+	case 1:
+		return (B_TRUE);
+	default:
+		break;
+	}
+
+	/*
+	 * If we're running a 32-bit kernel, for now, we don't support working
+	 * around broken speculation. Once this is better tested, this should be
+	 * removed.
+	 */
+#if !defined(__amd64)
+	return (B_FALSE);
+#endif
+
+	/*
+	 * If the CPU can't exonerate itself, assume it is broken. In the court
+	 * of speculations, we assume every CPU is guilty until proven innocent.
+	 */
+	if (cpi->cpi_maxeax < 1)
+		return (B_TRUE);
+
+	switch (cpi->cpi_vendor) {
+	case X86_VENDOR_Intel:
+		/*
+		 * At this time, assume all Intel x86 CPUs are broken. This may
+		 * erroneously catch some older CPUs.
+		 */
+		return (B_TRUE);
+	case X86_VENDOR_AMD:
+		/*
+		 * AMD clasims that their CPUs are not broken in this way.
+		 */
+		return (B_FALSE);
+	default:
+		/*
+		 * Dear Cyrix, Transmeta, and all you other Intel clones. If you
+		 * cloned Intel, we cloned all the broken things too.
+		 */
+		return (B_TRUE);
+	}
+
+	/*
+	 * No proof to the contrary provided, assume guilty.
+	 */
+	return (B_TRUE);
 }
