@@ -78,6 +78,20 @@ struct xen_evt_data {
 	ulong_t		evt_affinity[sizeof (ulong_t) * 8]; /* service on cpu */
 };
 
+/*
+ * This first value, MACHCPU_SIZE is the size of all the members in the struct
+ * machcpu, before we get to the mcpu_pad and the mcpu_shared.  The mcpu_shared
+ * is used to contain per-CPU data that is visible across the user/kernel data
+ * and must be a page size and aligned to a page. The pad members allows us to
+ * get there.
+ */
+#if defined(__amd64)
+#define	MACHCPU_SIZE	572
+#else
+#define	MACHCPU_SIZE	452
+#endif
+#define	MACHCPU_PAD	MMU_PAGESIZE - MACHCPU_SIZE
+
 struct	machcpu {
 	/*
 	 * x_call fields - used for interprocessor cross calls
@@ -147,6 +161,8 @@ struct	machcpu {
 	 * The low order bits will be incremented on every interrupt.
 	 */
 	volatile uint32_t	mcpu_istamp;
+	char			mcpu_pad[MACHCPU_PAD];
+	char			mcpu_shared[MMU_PAGESIZE];
 };
 
 #define	NINTR_THREADS	(LOCK_LEVEL-1)	/* number of interrupt threads */

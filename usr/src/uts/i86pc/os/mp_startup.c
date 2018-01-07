@@ -80,7 +80,8 @@
 #include <sys/cpu_module.h>
 #include <sys/ontrap.h>
 
-struct cpu	cpus[1];			/* CPU data */
+/* XXX Figure out why we aren't getting the real MMU_PAGESIZE here */
+struct cpu	cpus[1] __aligned(4096);	/* CPU data */
 struct cpu	*cpu[NCPU] = {&cpus[0]};	/* pointers to all CPUs */
 struct cpu	*cpu_free_list;			/* list for released CPUs */
 cpu_core_t	cpu_core[NCPU];			/* cpu_core structures */
