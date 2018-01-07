@@ -40,6 +40,9 @@ extern "C" {
 #include <sys/rm_platter.h>
 #include <sys/avintr.h>
 #include <sys/pte.h>
+#include <sys/stddef.h>
+#include <sys/debug.h>
+#include <sys/cpuvar.h>
 
 #ifndef	_ASM
 /*
@@ -78,19 +81,60 @@ struct xen_evt_data {
 	ulong_t		evt_affinity[sizeof (ulong_t) * 8]; /* service on cpu */
 };
 
+struct kpti_frame {
+	/*
+	 * We use %r14 and %r13 as scratch registers in the trampoline code,
+	 * so stash those here "below" the rest of the stack so they can be
+	 * pushed/popped if needed.
+	 */
+	greg_t		kf_r14;
+	greg_t		kf_r13;
+
+	/*
+	 * Part of this struct is used as the HW stack frame when taking an
+	 * interrupt on the user page table. The CPU is going to push a bunch
+	 * of regs onto the stack pointer set in the TSS/IDT (which we set to
+	 * &kf_rsp here).
+	 *
+	 * This is only a temporary holding area for them (we'll move them over
+	 * to the real interrupt stack once we've set %cr3).
+	 *
+	 * Note that these must be cleared during a process switch on this cpu.
+	 */
+	greg_t		kf_err;		/* Bottom of initial hw stack frame */
+	greg_t		kf_rip;
+	greg_t		kf_cs;
+	greg_t		kf_rflags;
+	greg_t		kf_rsp;
+	greg_t		kf_ss;
+
+	greg_t		kf_tr_rsp;	/* Top of HW stack frame */
+
+	/*
+	 * The things we need to write to %cr3 to change between page tables.
+	 * These live "above" the HW stack.
+	 */
+	greg_t		kf_kernel_cr3;
+	greg_t		kf_user_cr3;
+	/* XXX: add PCID stuff here */
+};
+
 /*
- * This first value, MACHCPU_SIZE is the size of all the members in the struct
- * machcpu, before we get to the mcpu_pad and the mcpu_shared.  The mcpu_shared
- * is used to contain per-CPU data that is visible across the user/kernel data
- * and must be a page size and aligned to a page. The pad members allows us to
- * get there.
+ * This first value, MACHCPU_SIZE is the size of all the members in the cpu_t
+ * AND struct machcpu, before we get to the mcpu_pad and the mcpu_shared.
+ * The mcpu_shared is used to contain per-CPU data that is visible across the
+ * user/kernel data and must be a page size and aligned to a page.  The pad
+ * members allows us to get there.
+ *
+ * There is a CTASSERT in os/intr.c that checks these numbers.
  */
 #if defined(__amd64)
-#define	MACHCPU_SIZE	572
+#define	MACHCPU_SIZE	(572 + 1568)
 #else
-#define	MACHCPU_SIZE	452
+#define	MACHCPU_SIZE	(452 + 1320)
 #endif
-#define	MACHCPU_PAD	MMU_PAGESIZE - MACHCPU_SIZE
+#define	MACHCPU_PAD	(MMU_PAGESIZE - MACHCPU_SIZE)
+#define	MACHCPU_PAD2	(MMU_PAGESIZE - sizeof (struct kpti_frame))
 
 struct	machcpu {
 	/*
@@ -161,8 +205,10 @@ struct	machcpu {
 	 * The low order bits will be incremented on every interrupt.
 	 */
 	volatile uint32_t	mcpu_istamp;
+
 	char			mcpu_pad[MACHCPU_PAD];
-	char			mcpu_shared[MMU_PAGESIZE];
+	struct kpti_frame	mcpu_kpti;
+	char			mcpu_pad2[MACHCPU_PAD2];
 };
 
 #define	NINTR_THREADS	(LOCK_LEVEL-1)	/* number of interrupt threads */

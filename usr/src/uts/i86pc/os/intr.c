@@ -471,6 +471,10 @@
 #include <sys/hypervisor.h>
 #endif
 
+/* If this fails, then the padding numbers in machcpuvar.h are wrong. */
+CTASSERT(((offsetof(cpu_t, cpu_m) + offsetof(struct machcpu, mcpu_kpti)) \
+	% MMU_PAGESIZE) == 0);
+
 
 #if defined(__xpv) && defined(DEBUG)
 
