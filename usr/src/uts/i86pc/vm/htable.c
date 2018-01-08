@@ -2549,7 +2549,7 @@ x86pte_zero_user(hat_t *hat)
 		x = PWIN_TABLE(CPU->cpu_id);
 		newpte = MAKEPTE(hat->hat_user_ptable, 0) | PT_WRITABLE;
 		xen_map(newpte, PWIN_VA(x));
-		dst_va = (caddr_t)PT_INDEX_PTR(PWIN_VA(x), entry);
+		dst_va = (caddr_t)PT_INDEX_PTR(PWIN_VA(x), 0);
 	} else
 #endif
 		dst_va = (caddr_t)x86pte_mapin(hat->hat_user_ptable, 0, NULL);
