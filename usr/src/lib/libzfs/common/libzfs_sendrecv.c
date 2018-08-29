@@ -3395,6 +3395,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 
 	if (stream_avl != NULL) {
 		char *keylocation = NULL;
+		nvlist_t *lookup = NULL;
 		nvlist_t *fs = fsavl_find(stream_avl, drrb->drr_toguid,
 		    &snapname);
 		int ret;
@@ -3428,13 +3429,15 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		}
 		ret = zcmd_write_src_nvlist(hdl, &zc, props);
 
-		if (0 == nvlist_lookup_nvlist(fs, "snapprops", &props)) {
-			VERIFY(0 == nvlist_lookup_nvlist(props,
+		if (0 == nvlist_lookup_nvlist(fs, "snapprops", &lookup)) {
+			VERIFY(0 == nvlist_lookup_nvlist(lookup,
 			    snapname, &snapprops_nvlist));
 		}
 
-		if (ret != 0)
-			return (-1);
+		if (ret != 0) {
+			err = -1;
+			goto out;
+		}
 	}
 
 	cp = NULL;
@@ -3455,7 +3458,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		if (strchr(tosnap, '@')) {
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "invalid "
 			    "argument - snapshot not allowed with -e"));
-			return (zfs_error(hdl, EZFS_INVALIDNAME, errbuf));
+			err = zfs_error(hdl, EZFS_INVALIDNAME, errbuf);
+			goto out;
 		}
 
 		chopprefix = strrchr(sendfs, '/');
@@ -3482,7 +3486,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		if (strchr(tosnap, '@')) {
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "invalid "
 			    "argument - snapshot not allowed with -d"));
-			return (zfs_error(hdl, EZFS_INVALIDNAME, errbuf));
+			err = zfs_error(hdl, EZFS_INVALIDNAME, errbuf);
+			goto out;
 		}
 
 		chopprefix = strchr(drrb->drr_toname, '/');
@@ -3500,7 +3505,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "cannot specify snapshot name for multi-snapshot "
 			    "stream"));
-			return (zfs_error(hdl, EZFS_BADSTREAM, errbuf));
+			err = zfs_error(hdl, EZFS_BADSTREAM, errbuf);
+			goto out;
 		}
 		chopprefix = drrb->drr_toname + strlen(drrb->drr_toname);
 	}
@@ -3519,7 +3525,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 	free(cp);
 	if (!zfs_name_valid(zc.zc_value, ZFS_TYPE_SNAPSHOT)) {
 		zcmd_free_nvlists(&zc);
-		return (zfs_error(hdl, EZFS_INVALIDNAME, errbuf));
+		err = zfs_error(hdl, EZFS_INVALIDNAME, errbuf);
+		goto out;
 	}
 
 	/*
@@ -3537,7 +3544,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "local origin for clone %s does not exist"),
 			    zc.zc_value);
-			return (zfs_error(hdl, EZFS_NOENT, errbuf));
+			err = zfs_error(hdl, EZFS_NOENT, errbuf);
+			goto out;
 		}
 		if (flags->verbose)
 			(void) printf("found clone origin %s\n", zc.zc_string);
@@ -3625,7 +3633,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 				    "destination '%s' exists\n"
 				    "must specify -F to overwrite it"),
 				    zc.zc_name);
-				return (zfs_error(hdl, EZFS_EXISTS, errbuf));
+				err = zfs_error(hdl, EZFS_EXISTS, errbuf);
+				goto out;
 			}
 			if (ioctl(hdl->libzfs_fd, ZFS_IOC_SNAPSHOT_LIST_NEXT,
 			    &zc) == 0) {
@@ -3634,14 +3643,16 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 				    "destination has snapshots (eg. %s)\n"
 				    "must destroy them to overwrite it"),
 				    zc.zc_name);
-				return (zfs_error(hdl, EZFS_EXISTS, errbuf));
+				err = zfs_error(hdl, EZFS_EXISTS, errbuf);
+				goto out;
 			}
 		}
 
 		if ((zhp = zfs_open(hdl, zc.zc_name,
 		    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME)) == NULL) {
 			zcmd_free_nvlists(&zc);
-			return (-1);
+			err = -1;
+			goto out;
 		}
 
 		if (stream_wantsnewfs &&
@@ -3652,7 +3663,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			    "destination '%s' is a clone\n"
 			    "must destroy it to overwrite it"),
 			    zc.zc_name);
-			return (zfs_error(hdl, EZFS_EXISTS, errbuf));
+			err = zfs_error(hdl, EZFS_EXISTS, errbuf);
+			goto out;
 		}
 
 		/*
@@ -3674,7 +3686,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			    "cannot perform raw receive on top of "
 			    "existing unencrypted dataset"));
 			err = zfs_error(hdl, EZFS_BADRESTORE, errbuf);
-			return (-1);
+			goto out;
 		}
 
 		if (stream_wantsnewfs && flags->force &&
@@ -3686,7 +3698,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			    "encrypted filesystem or overwrite an "
 			    "unencrypted one with an encrypted one"));
 			err = zfs_error(hdl, EZFS_BADRESTORE, errbuf);
-			return (-1);
+			goto out;
 		}
 
 		if (!flags->dryrun && zhp->zfs_type == ZFS_TYPE_FILESYSTEM &&
@@ -3696,13 +3708,15 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			if (clp == NULL) {
 				zfs_close(zhp);
 				zcmd_free_nvlists(&zc);
-				return (-1);
+				err = -1;
+				goto out;
 			}
 			if (changelist_prefix(clp) != 0) {
 				changelist_free(clp);
 				zfs_close(zhp);
 				zcmd_free_nvlists(&zc);
-				return (-1);
+				err = -1;
+				goto out;
 			}
 		}
 
@@ -3733,7 +3747,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 			zcmd_free_nvlists(&zc);
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "destination '%s' does not exist"), zc.zc_name);
-			return (zfs_error(hdl, EZFS_NOENT, errbuf));
+			err = zfs_error(hdl, EZFS_NOENT, errbuf);
+			goto out;
 		}
 
 		/*
@@ -3745,7 +3760,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		if (flags->isprefix && !flags->istail && !flags->dryrun &&
 		    create_parents(hdl, zc.zc_value, strlen(tosnap)) != 0) {
 			zcmd_free_nvlists(&zc);
-			return (zfs_error(hdl, EZFS_BADRESTORE, errbuf));
+			 err = zfs_error(hdl, EZFS_BADRESTORE, errbuf);
+			 goto out;
 		}
 
 		/*
@@ -3763,8 +3779,9 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 
 			zhp = zfs_open(hdl, zc.zc_name, ZFS_TYPE_DATASET);
 			if (zhp == NULL) {
-				return (zfs_error(hdl, EZFS_BADRESTORE,
-				    errbuf));
+				err = zfs_error(hdl, EZFS_BADRESTORE,
+				    errbuf);
+				goto out;
 			}
 
 			crypt = zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION);
@@ -3775,7 +3792,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 				    "parent '%s' must not be encrypted to "
 				    "receive unenecrypted property"),
 				    zc.zc_name);
-				return (zfs_error(hdl, EZFS_BADPROP, errbuf));
+				err = zfs_error(hdl, EZFS_BADPROP, errbuf);
+				goto out;
 			}
 		}
 
@@ -3797,7 +3815,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 
 	if (flags->dryrun) {
 		zcmd_free_nvlists(&zc);
-		return (recv_skip(hdl, infd, flags->byteswap));
+		err = recv_skip(hdl, infd, flags->byteswap);
+		goto out;
 	}
 
 	zc.zc_nvlist_dst = (uint64_t)(uintptr_t)prop_errbuf;
@@ -4020,8 +4039,10 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		(void) fprintf(stderr, "\n");
 	}
 
-	if (err || ioctl_err)
-		return (-1);
+	if (err || ioctl_err) {
+		err = -1;
+		goto out;
+	}
 
 	*action_handlep = zc.zc_action_handle;
 
@@ -4039,6 +4060,9 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		    buf1, delta, buf2);
 	}
 
+	err = 0;
+out:
+
 	if (tmp_keylocation[0] != '\0') {
 		VERIFY(0 == nvlist_add_string(props,
 		    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), tmp_keylocation));
@@ -4047,7 +4071,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 	if (newprops)
 		nvlist_free(props);
 
-	return (0);
+	return (err);
 }
 
 static int
