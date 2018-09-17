@@ -1158,8 +1158,8 @@ zpool_create(libzfs_handle_t *hdl, const char *pool, nvlist_t *nvroot,
 		    (nvlist_alloc(&zc_props, NV_UNIQUE_NAME, 0) != 0)) {
 			goto create_failed;
 		}
-		if (zfs_crypto_create(hdl, NULL, zc_fsprops, props,
-		    &wkeydata, &wkeylen) != 0) {
+		if (zfs_crypto_create(hdl, NULL, ZFS_TYPE_FILESYSTEM,
+		    zc_fsprops, props, &wkeydata, &wkeylen) != 0) {
 			(void) zfs_error(hdl, EZFS_CRYPTOFAILED, msg);
 			goto create_failed;
 		}

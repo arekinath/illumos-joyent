@@ -1532,6 +1532,7 @@ zio_crypt_init_uios_zil(boolean_t encrypt, uint8_t *plainbuf,
 	}
 
 	*no_crypt = (nr_iovecs == 0);
+	VERIFY(*no_crypt || total_len > 0);
 	*enc_len = total_len;
 	*authbuf = aadbuf;
 	*auth_len = aad_len;
@@ -1565,6 +1566,7 @@ error:
 	puio->uio_iovcnt = 0;
 	cuio->uio_iov = NULL;
 	cuio->uio_iovcnt = 0;
+	VERIFY(ret != 0);
 	return (ret);
 }
 
@@ -1928,6 +1930,8 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
 	/* perform the encryption / decryption */
 	ret = zio_do_crypt_uio(encrypt, key->zk_crypt, ckey, tmpl, iv, enc_len,
 	    &puio, &cuio, authbuf, auth_len);
+	if (ret != 0 && no_crypt)
+		ret = 0;
 	if (ret != 0)
 		goto error;
 

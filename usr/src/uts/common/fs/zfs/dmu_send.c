@@ -1587,6 +1587,7 @@ recv_begin_check_existing_impl(dmu_recv_begin_arg_t *drba, dsl_dataset_t *ds,
 
 			error = dmu_objset_create_crypt_check(
 			    ds->ds_dir->dd_parent, drba->drba_dcp,
+			    ds->ds_objset->os_phys->os_type,
 			    &will_encrypt);
 			if (error != 0)
 				return (error);
@@ -1721,7 +1722,8 @@ dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
 			 * embedded data.
 			 */
 			error = dmu_objset_create_crypt_check(ds->ds_dir,
-			    drba->drba_dcp, &will_encrypt);
+			    drba->drba_dcp, ds->ds_objset->os_phys->os_type,
+			    &will_encrypt);
 			if (error != 0) {
 				dsl_dataset_rele_flags(ds, dsflags, FTAG);
 				return (error);

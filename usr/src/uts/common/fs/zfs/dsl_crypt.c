@@ -1702,7 +1702,7 @@ dmu_objset_clone_crypt_check(dsl_dir_t *parentdd, dsl_dir_t *origindd)
 
 int
 dmu_objset_create_crypt_check(dsl_dir_t *parentdd, dsl_crypto_params_t *dcp,
-    boolean_t *will_encrypt)
+    dmu_objset_type_t type, boolean_t *will_encrypt)
 {
 	int ret;
 	uint64_t pcrypt, crypt;
@@ -1732,9 +1732,12 @@ dmu_objset_create_crypt_check(dsl_dir_t *parentdd, dsl_crypto_params_t *dcp,
 
 	/*
 	 * We can't create an unencrypted child of an encrypted parent
-	 * under any circumstances.
+	 * except when it's a zvol. We allow this to support dump zvols
+	 * on pools with encryption set at the top, until there is
+	 * proper support for encrypted dump zvols.
 	 */
-	if (crypt == ZIO_CRYPT_OFF && pcrypt != ZIO_CRYPT_OFF)
+	if (crypt == ZIO_CRYPT_OFF && pcrypt != ZIO_CRYPT_OFF &&
+	    type != DMU_OST_ZVOL)
 		return (SET_ERROR(EINVAL));
 
 	/* check for valid dcp with no encryption (inherited or local) */
