@@ -7234,7 +7234,7 @@ ddi_dma_cookie_iter(ddi_dma_handle_t handle, const ddi_dma_cookie_t *iter)
 		return (NULL);
 	}
 
-	return (NULL);
+	return (iter);
 }
 
 const ddi_dma_cookie_t *

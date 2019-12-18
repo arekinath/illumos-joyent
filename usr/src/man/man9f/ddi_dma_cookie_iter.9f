@@ -123,11 +123,9 @@ This function always returns the single cookie assosciated with the DMA
 handle
 .Fa handle .
 If this function is used when there is a DMA request with multiple
-cookies, then it will return
+cookies, then it will panic the system.
+It can never return
 .Dv NULL .
-Violating this may trigger an assertion on
-.Sy DEBUG
-kernels.
 .Pp
 The
 .Fn ddi_dma_ncookies

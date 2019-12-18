@@ -2261,7 +2261,7 @@ fast:
 	}
 	*cookiep = dma->dp_cookies[0];
 	hp->dmai_cookie++;
-	hp->dma_ncookies = *ccountp;
+	hp->dmai_ncookies = *ccountp;
 	hp->dmai_curcookie = 1;
 
 	ROOTNEX_DPROF_INC(&rootnex_cnt[ROOTNEX_CNT_ACTIVE_BINDS]);
