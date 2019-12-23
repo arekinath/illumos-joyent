@@ -83,6 +83,7 @@ _MANFILES=	aac.7d		\
 		lofi.7d		\
 		log.7d		\
 		mem.7d		\
+		mlxcx.7d	\
 		mpt_sas.7d	\
 		mr_sas.7d	\
 		msglog.7d	\
