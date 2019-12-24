@@ -23,7 +23,86 @@
  * https://www.mellanox.com/related-docs/user_manuals/ \
  *   Ethernet_Adapters_Programming_Manual.pdf
  */
-
+/*
+ * ConnectX glossary
+ * -----------------
+ *
+ * WR		Work Request: something we've asked the hardware to do by
+ * 		creating a Work Queue Entry (WQE), e.g. send or recv a packet
+ *
+ * WQE		Work Queue Entry: a descriptor on a work queue descriptor ring
+ *
+ * WQ		Work Queue: a descriptor ring that we can place WQEs on, usually
+ * 		either a Send Queue (SQ) or Receive Queue (RQ). Different WQ
+ *		types have different WQE structures, different commands for
+ *		creating and destroying them, etc, but share a common context
+ *		structure, counter setup and state graph.
+ * SQ		Send Queue, a specific type of WQ that sends packets
+ * RQ		Receive Queue, a specific type of WQ that receives packets
+ *
+ * CQ		Completion Queue: completion of WRs from a WQ are reported to
+ *		one of these, as a CQE on its entry ring.
+ * CQE		Completion Queue Entry: an entry in a CQ ring. Contains error
+ *		info, as well as packet size, the ID of the WQ, and the index
+ *		of the WQE which completed. Does not contain any packet data.
+ *
+ * EQ		Event Queue: a ring of event structs from the hardware informing
+ *		us when particular events happen. Many events can point at a
+ *		a particular CQ which we should then go look at.
+ * EQE		Event Queue Entry: an entry on the EQ ring
+ *
+ * UAR		User Access Region, a page of the device's PCI BAR which is
+ *		tied to particular EQ/CQ/WQ sets and contains doorbells to
+ *		ring to arm them for interrupts or wake them up for new work
+ *
+ * RQT		RQ Table, a collection of indexed RQs used to refer to the group
+ *		as a single unit (for e.g. hashing/RSS).
+ *
+ * TIR		Transport Interface Recieve, a bucket of resources for the
+ *		reception of packets. TIRs have to point at either a single RQ
+ *		or a table of RQs (RQT). They then serve as a target for flow
+ *		table entries (FEs). TIRs that point at an RQT also contain the
+ *		settings for hashing for RSS.
+ *
+ * TIS		Transport Interface Send, a bucket of resources associated with
+ *		the transmission of packets. In particular, the temporary
+ *		resources used for LSO internally in the card are accounted to
+ *		a TIS.
+ *
+ * FT		Flow Table, a collection of FEs and FGs that can be referred to
+ *		as a single entity (e.g. used as a target from another flow
+ *		entry or set as the "root" table to handle incoming or outgoing
+ *		packets). Packets arriving at a FT are matched against the
+ *		FEs in the table until either one matches with a terminating
+ *		action or all FEs are exhausted (it's first-match-wins but with
+ *		some actions that are non-terminal, like counting actions).
+ *
+ * FG		Flow Group, a group of FEs which share a common "mask" (i.e.
+ *		they match on the same attributes of packets coming into the
+ *		flow).
+ *
+ * FE		Flow Entry, an individual set of values to match against
+ *		packets entering the flow table, combined with an action to
+ *		take upon a successful match. The action we use most is
+ *		"forward", which sends the packets to a TIR or another flow
+ *		table and then stops further processing within the FE's FT.
+ *
+ * lkey/mkey	A reference to something similar to a page table but in the
+ *		device's internal onboard MMU. Since Connect-X parts double as
+ *		IB cards (lots of RDMA) they have extensive onboard memory mgmt
+ *		features which we try very hard not to use. For our WQEs we use
+ *		the "reserved" lkey, which is a special value which indicates
+ *		that addresses we give are linear addresses and should not be
+ *		translated.
+ *
+ * PD		Protection Domain, an IB concept. We have to allocate one to
+ *		provide as a parameter for new WQs, but we don't do anything
+ *		with it.
+ *
+ * TDOM/TD	Transport Domain, an IB concept. We allocate one in order to
+ *		provide it as a parameter to TIR/TIS creation, but we don't do
+ *		anything with it.
+ */
 /*
  *
  * Data flow overview
