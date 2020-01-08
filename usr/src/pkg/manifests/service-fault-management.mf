@@ -359,6 +359,8 @@ file path=usr/lib/fm/dict/SUNOS.dict mode=0444 \
     variant.opensolaris.zone=__NODEFAULT
 file path=usr/lib/fm/dict/ZFS.dict mode=0444 \
     variant.opensolaris.zone=__NODEFAULT
+file path=usr/lib/fm/dict/NIC.dict mode=0444 \
+    variant.opensolaris.zone=__NODEFAULT
 #
 # Eversholt rules are global zone only
 #
@@ -371,6 +373,7 @@ file path=usr/lib/fm/eft/pciex.eft mode=0444
 file path=usr/lib/fm/eft/pciexrc.eft mode=0444
 file path=usr/lib/fm/eft/sensor.eft mode=0444
 file path=usr/lib/fm/eft/storage.eft mode=0444
+file path=usr/lib/fm/eft/nic.eft mode=0444
 #
 # usr/lib/fm/fmd executables:
 #	- fmd is common, as are fminject, fmsim and fmtopo
