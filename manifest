@@ -5725,6 +5725,7 @@ f usr/lib/fm/dict/STORAGE.dict 0444 root bin
 f usr/lib/fm/dict/SUNOS.dict 0444 root bin
 f usr/lib/fm/dict/TEST.dict 0444 root bin
 f usr/lib/fm/dict/ZFS.dict 0444 root bin
+f usr/lib/fm/dict/NIC.dict 0444 root bin
 d usr/lib/fm/eft 0755 root bin
 f usr/lib/fm/eft/disk.eft 0444 root bin
 f usr/lib/fm/eft/neptune_xaui.eft 0444 root bin
@@ -5736,6 +5737,7 @@ f usr/lib/fm/eft/sca1000.eft 0444 root bin
 f usr/lib/fm/eft/sca500.eft 0444 root bin
 f usr/lib/fm/eft/sensor.eft 0444 root bin
 f usr/lib/fm/eft/storage.eft 0444 root bin
+f usr/lib/fm/eft/nic.eft 0444 root bin
 f usr/lib/fm/eftinfo 0555 root bin
 f usr/lib/fm/esc 0555 root bin
 d usr/lib/fm/fmd 0755 root bin
@@ -7015,6 +7017,8 @@ f usr/lib/locale/C/LC_MESSAGES/TEST.mo 0444 root bin
 f usr/lib/locale/C/LC_MESSAGES/TEST.po 0644 root bin
 f usr/lib/locale/C/LC_MESSAGES/ZFS.mo 0444 root bin
 f usr/lib/locale/C/LC_MESSAGES/ZFS.po 0644 root bin
+f usr/lib/locale/C/LC_MESSAGES/NIC.po 0644 root bin
+f usr/lib/locale/C/LC_MESSAGES/NIC.mo 0644 root bin
 d usr/lib/locale/C/LC_MONETARY 0755 root bin
 d usr/lib/locale/C/LC_NUMERIC 0755 root bin
 d usr/lib/locale/C/LC_TIME 0755 root bin
