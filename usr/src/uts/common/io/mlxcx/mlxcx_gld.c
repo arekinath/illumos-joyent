@@ -616,8 +616,6 @@ mlxcx_group_add_mac(void *arg, const uint8_t *mac_addr)
  * Support for VLAN steering into groups is not yet available in upstream
  * illumos.
  */
-#if defined(MAC_VLAN_UNTAGGED)
-
 static int
 mlxcx_group_add_vlan(mac_group_driver_t gh, uint16_t vid)
 {
@@ -661,8 +659,6 @@ mlxcx_group_remove_vlan(mac_group_driver_t gh, uint16_t vid)
 
 	return (ret);
 }
-
-#endif /* MAC_VLAN_UNTAGGED */
 
 static int
 mlxcx_group_remove_mac(void *arg, const uint8_t *mac_addr)

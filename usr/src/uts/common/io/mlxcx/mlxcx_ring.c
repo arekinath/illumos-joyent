@@ -12,6 +12,7 @@
 /*
  * Copyright 2020, The University of Queensland
  * Copyright (c) 2018, Joyent, Inc.
+ * Copyright 2020 RackTop Systems, Inc.
  */
 
 /*
@@ -515,16 +516,22 @@ mlxcx_teardown_rx_group(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 			mutex_enter(&g->mlg_rx_vlan_ft->mlft_mtx);
 			ASSERT(list_is_empty(&g->mlg_rx_vlans));
 			fg = g->mlg_rx_vlan_def_fg;
-			fe = list_head(&fg->mlfg_entries);
-			if (fe->mlfe_state & MLXCX_FLOW_ENTRY_CREATED) {
-				(void) mlxcx_cmd_delete_flow_table_entry(
-				    mlxp, fe);
+			if (fg != NULL) {
+				fe = list_head(&fg->mlfg_entries);
+				if (fe->mlfe_state & MLXCX_FLOW_ENTRY_CREATED) {
+					(void)
+					    mlxcx_cmd_delete_flow_table_entry(
+					    mlxp, fe);
+				}
 			}
 			fg = g->mlg_rx_vlan_promisc_fg;
-			fe = list_head(&fg->mlfg_entries);
-			if (fe->mlfe_state & MLXCX_FLOW_ENTRY_CREATED) {
-				(void) mlxcx_cmd_delete_flow_table_entry(
-				    mlxp, fe);
+			if (fg != NULL) {
+				fe = list_head(&fg->mlfg_entries);
+				if (fe->mlfe_state & MLXCX_FLOW_ENTRY_CREATED) {
+					(void)
+					    mlxcx_cmd_delete_flow_table_entry(
+					    mlxp, fe);
+				}
 			}
 			mlxcx_teardown_flow_table(mlxp, g->mlg_rx_vlan_ft);
 			list_destroy(&g->mlg_rx_vlans);
@@ -722,7 +729,7 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 		while (eq == NULL) {
 			eq = &mlxp->mlx_eqs[mlxp->mlx_next_eq++];
 			if (mlxp->mlx_next_eq >= mlxp->mlx_intr_count)
-				mlxp->mlx_next_eq = 1;
+				mlxp->mlx_next_eq = mlxp->mlx_intr_cq0;
 			if (eq->mleq_type != MLXCX_EQ_TYPE_ANY &&
 			    eq->mleq_type != MLXCX_EQ_TYPE_RX) {
 				/* Try the next one */
@@ -1156,12 +1163,10 @@ mlxcx_rx_ring_start(mlxcx_t *mlxp, mlxcx_ring_group_t *g,
 	ASSERT0(rq->mlwq_state & MLXCX_WQ_BUFFERS);
 	rq->mlwq_state |= MLXCX_WQ_BUFFERS;
 
-	for (j = 0; j < rq->mlwq_nents; ++j) {
-		if (!mlxcx_buf_create(mlxp, rq->mlwq_bufs, &b))
-			break;
-		mlxcx_buf_return(mlxp, b);
-	}
-	for (j = 0; j < rq->mlwq_nents / 2; ++j) {
+	/*
+	 * Over allocate the RQ buffers by a factor of 2.
+	 */
+	for (j = 0; j < 2 * rq->mlwq_nents; ++j) {
 		if (!mlxcx_buf_create(mlxp, rq->mlwq_bufs, &b))
 			break;
 		mlxcx_buf_return(mlxp, b);
@@ -1265,7 +1270,7 @@ mlxcx_tx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 		while (eq == NULL) {
 			eq = &mlxp->mlx_eqs[mlxp->mlx_next_eq++];
 			if (mlxp->mlx_next_eq >= mlxp->mlx_intr_count)
-				mlxp->mlx_next_eq = 1;
+				mlxp->mlx_next_eq = mlxp->mlx_intr_cq0;
 			if (eq->mleq_type != MLXCX_EQ_TYPE_ANY &&
 			    eq->mleq_type != MLXCX_EQ_TYPE_TX) {
 				/* Try the next one */
@@ -1695,10 +1700,17 @@ mlxcx_rq_refill(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	done = 0;
 
 	while (!(mlwq->mlwq_state & MLXCX_WQ_TEARDOWN) && done < want) {
-		n = mlxcx_buf_take_n(mlxp, mlwq, b, MLXCX_RQ_REFILL_STEP);
+		/*
+		 * On the first iteration we will block if we can't get
+		 * at least 1 buffer. Otherwise will take what we can.
+		 */
+		n = mlxcx_buf_take_n(mlxp, mlwq, b, done == 0 ? 1 : 0,
+		    MLXCX_RQ_REFILL_STEP);
 		if (n == 0) {
-			mlxcx_warn(mlxp, "!exiting rq refill early, done %u "
-			    "but wanted %u", done, want);
+			if (done == 0) {
+				mlxcx_warn(mlxp, "!not able to refill the rq, "
+				    "wanted %u", want);
+			}
 			return;
 		}
 		if (mlwq->mlwq_state & MLXCX_WQ_TEARDOWN) {
@@ -2109,7 +2121,7 @@ mlxcx_buf_take(mlxcx_t *mlxp, mlxcx_work_queue_t *wq, mlxcx_buffer_t **bp)
 
 size_t
 mlxcx_buf_take_n(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
-    mlxcx_buffer_t **bp, size_t nbufs)
+    mlxcx_buffer_t **bp, size_t min_bufs, size_t nbufs)
 {
 	mlxcx_buffer_t *b;
 	size_t done = 0, empty = 0;
@@ -2121,6 +2133,16 @@ mlxcx_buf_take_n(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
 	mutex_enter(&s->mlbs_mtx);
 	while (done < nbufs) {
 		while (list_is_empty(&s->mlbs_free)) {
+			/*
+			 * We only wait if we have not been able to
+			 * take min_bufs. Otherwise we return what
+			 * we have taken without blocking.
+			 */
+			if (done >= min_bufs) {
+				mutex_exit(&s->mlbs_mtx);
+				return (done);
+			}
+
 			(void) cv_reltimedwait(&s->mlbs_free_nonempty,
 			    &s->mlbs_mtx, wtime, TR_MILLISEC);
 			if (list_is_empty(&s->mlbs_free) &&
@@ -2129,6 +2151,7 @@ mlxcx_buf_take_n(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
 				return (done);
 			}
 		}
+
 		b = list_remove_head(&s->mlbs_free);
 		ASSERT3U(b->mlb_state, ==, MLXCX_BUFFER_FREE);
 		b->mlb_state = MLXCX_BUFFER_ON_WQ;

@@ -12,6 +12,7 @@
 /*
  * Copyright 2020, The University of Queensland
  * Copyright (c) 2018, Joyent, Inc.
+ * Copyright 2020 RackTop Systems, Inc.
  */
 
 /*
@@ -32,6 +33,7 @@
 #include <sys/ddifm.h>
 #include <sys/id_space.h>
 #include <sys/list.h>
+#include <sys/taskq_impl.h>
 #include <sys/stddef.h>
 #include <sys/stream.h>
 #include <sys/strsun.h>
@@ -184,10 +186,18 @@ extern uint_t mlxcx_stuck_intr_count;
 #define	MLXCX_NULL_LKEY		0x100
 
 /*
+ * The max function id we support in manage pages requests.
+ * At the moment we only support/expect func 0 from manage pages, but
+ * structures and code are in place to support any number.
+ */
+#define	MLXCX_FUNC_ID_MAX	0
+
+/*
  * Forwards
  */
 struct mlxcx;
 typedef struct mlxcx mlxcx_t;
+typedef struct mlxcx_cmd mlxcx_cmd_t;
 
 typedef enum {
 	MLXCX_DMABUF_HDL_ALLOC		= 1 << 0,
@@ -225,12 +235,15 @@ typedef struct mlxcx_cmd_queue {
 	kmutex_t		mcmd_lock;
 	kcondvar_t		mcmd_cv;
 	mlxcx_dma_buffer_t	mcmd_dma;
-	mlxcx_cmd_ent_t		*mcmd_ent;
+
+	boolean_t		mcmd_polled;
 
 	uint8_t			mcmd_size_l2;
 	uint8_t			mcmd_stride_l2;
+	uint_t			mcmd_size;
+	uint32_t		mcmd_mask;
 
-	mlxcx_cmd_queue_status_t	mcmd_status;
+	mlxcx_cmd_t		*mcmd_active[MLXCX_CMD_MAX];
 
 	ddi_taskq_t		*mcmd_taskq;
 	id_space_t		*mcmd_tokens;
@@ -790,11 +803,12 @@ typedef enum mlxcx_cmd_state {
 	MLXCX_CMD_S_ERROR	= 1 << 1
 } mlxcx_cmd_state_t;
 
-typedef struct mlxcx_cmd {
+struct mlxcx_cmd {
 	struct mlxcx		*mlcmd_mlxp;
 	kmutex_t		mlcmd_lock;
 	kcondvar_t		mlcmd_cv;
 
+	boolean_t		mlcmd_poll;
 	uint8_t			mlcmd_token;
 	mlxcx_cmd_op_t		mlcmd_op;
 
@@ -814,7 +828,7 @@ typedef struct mlxcx_cmd {
 	 */
 	mlxcx_cmd_state_t	mlcmd_state;
 	uint8_t			mlcmd_status;
-} mlxcx_cmd_t;
+};
 
 /*
  * Our view of capabilities.
@@ -841,6 +855,7 @@ typedef struct {
 	size_t			mlc_max_rx_ft_shift;
 	size_t			mlc_max_rx_fe_dest;
 	size_t			mlc_max_rx_flows;
+	size_t			mlc_max_rx_ft;
 
 	size_t			mlc_max_tir;
 
@@ -894,6 +909,13 @@ typedef enum {
 	MLXCX_ATTACH_CAPS	= 1 << 15,
 	MLXCX_ATTACH_CHKTIMERS	= 1 << 16,
 } mlxcx_attach_progress_t;
+
+typedef struct {
+	mlxcx_t		*mlp_mlx;
+	int32_t		mlp_npages;
+	uint16_t	mlp_func;
+	taskq_ent_t	mlp_tqe;
+} mlxcx_pages_request_t;
 
 struct mlxcx {
 	/* entry on the mlxcx_glist */
@@ -950,6 +972,7 @@ struct mlxcx {
 	uint_t			mlx_intr_type;		/* always MSI-X */
 	int			mlx_intr_count;
 	size_t			mlx_intr_size;		/* allocation size */
+	int			mlx_intr_cq0;
 	ddi_intr_handle_t	*mlx_intr_handles;
 
 	/*
@@ -989,6 +1012,9 @@ struct mlxcx {
 	kmutex_t		mlx_pagemtx;
 	uint_t			mlx_npages;
 	avl_tree_t		mlx_pages;
+
+	mlxcx_pages_request_t	mlx_npages_req[MLXCX_FUNC_ID_MAX + 1];
+	taskq_t			*mlx_pages_tq;
 
 	/*
 	 * Port state
@@ -1074,7 +1100,7 @@ extern void mlxcx_dma_queue_attr(mlxcx_t *, ddi_dma_attr_t *);
 extern void mlxcx_dma_qdbell_attr(mlxcx_t *, ddi_dma_attr_t *);
 extern void mlxcx_dma_buf_attr(mlxcx_t *, ddi_dma_attr_t *);
 
-extern boolean_t mlxcx_give_pages(mlxcx_t *, int32_t);
+extern boolean_t mlxcx_give_pages(mlxcx_t *, int32_t, int32_t *);
 
 static inline const ddi_dma_cookie_t *
 mlxcx_dma_cookie_iter(const mlxcx_dma_buffer_t *db,
@@ -1120,7 +1146,7 @@ extern boolean_t mlxcx_buf_create_foreign(mlxcx_t *, mlxcx_buf_shard_t *,
     mlxcx_buffer_t **);
 extern void mlxcx_buf_take(mlxcx_t *, mlxcx_work_queue_t *, mlxcx_buffer_t **);
 extern size_t mlxcx_buf_take_n(mlxcx_t *, mlxcx_work_queue_t *,
-    mlxcx_buffer_t **, size_t);
+    mlxcx_buffer_t **, size_t, size_t);
 extern boolean_t mlxcx_buf_loan(mlxcx_t *, mlxcx_buffer_t *);
 extern void mlxcx_buf_return(mlxcx_t *, mlxcx_buffer_t *);
 extern void mlxcx_buf_return_chain(mlxcx_t *, mlxcx_buffer_t *, boolean_t);
@@ -1184,6 +1210,10 @@ extern boolean_t mlxcx_add_vlan_entry(mlxcx_t *, mlxcx_ring_group_t *,
  */
 extern boolean_t mlxcx_cmd_queue_init(mlxcx_t *);
 extern void mlxcx_cmd_queue_fini(mlxcx_t *);
+
+extern void mlxcx_cmd_completion(mlxcx_t *, mlxcx_eventq_ent_t *);
+extern void mlxcx_cmd_eq_enable(mlxcx_t *);
+extern void mlxcx_cmd_eq_disable(mlxcx_t *);
 
 extern boolean_t mlxcx_cmd_enable_hca(mlxcx_t *);
 extern boolean_t mlxcx_cmd_disable_hca(mlxcx_t *);
