@@ -119,6 +119,9 @@
  * interrupt that the system gives us for the device. Normally this means we
  * have 8 EQs.
  *
+ * When we have >= 8 EQs available, we try to allocate only RX or only TX
+ * CQs on each one. The EQs are chosen for RX and TX in an alternating fashion.
+ *
  * EQ #0 is reserved for all event types other than completion events, and has
  * no CQs associated with it at any time. EQs #1 and upwards are only used for
  * handling CQ completion events.
@@ -150,7 +153,7 @@
  * | RQ 2 |---->| CQ 5 |-------+
  * +------+     +------+
  *
- *   ...
+ *   ... (note this diagram does not show RX-only or TX-only EQs)
  *
  * For TX, we advertise all of the SQs we create as plain rings to MAC with
  * no TX groups. This puts MAC in "virtual group" mode where it will allocate
@@ -425,6 +428,8 @@
 
 #include <mlxcx.h>
 
+CTASSERT((1 << MLXCX_RX_HASH_FT_SIZE_SHIFT) >= MLXCX_TIRS_PER_GROUP);
+
 #define	MLXCX_MODULE_NAME	"mlxcx"
 /*
  * We give this to the firmware, so it has to be in a fixed format that it
@@ -438,27 +443,7 @@
 clock_t mlxcx_reclaim_delay = 1000 * 50; /* 50 ms in us */
 uint_t mlxcx_reclaim_tries = 100; /* Wait at most 5000ms */
 
-static kmutex_t mlxcx_glock;
-static list_t mlxcx_glist;
-static boolean_t mlxcx_init_props = B_FALSE;
-
-/* These are all set by mlxcx_load_props() based on mlxcx.conf */
-uint_t mlxcx_eq_size_shift;
-uint_t mlxcx_cq_size_shift;
-uint_t mlxcx_rq_size_shift;
-uint_t mlxcx_sq_size_shift;
-uint_t mlxcx_cqemod_period_usec;
-uint_t mlxcx_cqemod_count;
-uint_t mlxcx_intrmod_period_usec;
-uint_t mlxcx_rx_ngroups_large;
-uint_t mlxcx_rx_ngroups_small;
-uint_t mlxcx_rx_nrings_per_large_group;
-uint_t mlxcx_rx_nrings_per_small_group;
-uint_t mlxcx_tx_ngroups;
-uint_t mlxcx_tx_nrings_per_group;
-uint_t mlxcx_ftbl_root_size_shift;
-size_t mlxcx_tx_bind_threshold;
-uint_t mlxcx_ftbl_vlan_size_shift;
+static void *mlxcx_softstate;
 
 /*
  * Fault detection thresholds.
@@ -469,65 +454,72 @@ uint_t mlxcx_stuck_intr_count = MLXCX_STUCK_INTR_COUNT_DFLT;
 static void
 mlxcx_load_props(mlxcx_t *mlxp)
 {
-	ASSERT(mutex_owned(&mlxcx_glock));
-	if (mlxcx_init_props)
-		return;
-	mlxcx_init_props = B_TRUE;
+	mlxcx_drv_props_t *p = &mlxp->mlx_props;
 
-	mlxcx_eq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_eq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "eq_size_shift",
 	    MLXCX_EQ_SIZE_SHIFT_DFLT);
-	mlxcx_cq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_cq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "cq_size_shift",
 	    MLXCX_CQ_SIZE_SHIFT_DFLT);
-	mlxcx_sq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_sq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "sq_size_shift",
 	    MLXCX_SQ_SIZE_SHIFT_DFLT);
-	mlxcx_rq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_rq_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "rq_size_shift",
 	    MLXCX_RQ_SIZE_SHIFT_DFLT);
 
-	mlxcx_cqemod_period_usec = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_cqemod_period_usec = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "cqemod_period_usec",
 	    MLXCX_CQEMOD_PERIOD_USEC_DFLT);
-	mlxcx_cqemod_count = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_cqemod_count = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "cqemod_count",
 	    MLXCX_CQEMOD_COUNT_DFLT);
-	mlxcx_intrmod_period_usec = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_intrmod_period_usec = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "intrmod_period_usec",
 	    MLXCX_INTRMOD_PERIOD_USEC_DFLT);
 
-	mlxcx_tx_ngroups = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_tx_ngroups = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "tx_ngroups",
 	    MLXCX_TX_NGROUPS_DFLT);
-	mlxcx_tx_nrings_per_group = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_tx_nrings_per_group = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "tx_nrings_per_group",
 	    MLXCX_TX_NRINGS_PER_GROUP_DFLT);
 
-	mlxcx_rx_ngroups_large = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_rx_ngroups_large = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "rx_ngroups_large",
 	    MLXCX_RX_NGROUPS_LARGE_DFLT);
-	mlxcx_rx_ngroups_small = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_rx_ngroups_small = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "rx_ngroups_small",
 	    MLXCX_RX_NGROUPS_SMALL_DFLT);
-	mlxcx_rx_nrings_per_large_group = ddi_getprop(DDI_DEV_T_ANY,
+	p->mldp_rx_nrings_per_large_group = ddi_getprop(DDI_DEV_T_ANY,
 	    mlxp->mlx_dip, DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS,
 	    "rx_nrings_per_large_group", MLXCX_RX_NRINGS_PER_LARGE_GROUP_DFLT);
-	mlxcx_rx_nrings_per_small_group = ddi_getprop(DDI_DEV_T_ANY,
+	p->mldp_rx_nrings_per_small_group = ddi_getprop(DDI_DEV_T_ANY,
 	    mlxp->mlx_dip, DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS,
 	    "rx_nrings_per_small_group", MLXCX_RX_NRINGS_PER_SMALL_GROUP_DFLT);
 
-	mlxcx_ftbl_root_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_ftbl_root_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "ftbl_root_size_shift",
 	    MLXCX_FTBL_ROOT_SIZE_SHIFT_DFLT);
 
-	mlxcx_tx_bind_threshold = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_tx_bind_threshold = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "tx_bind_threshold",
 	    MLXCX_TX_BIND_THRESHOLD_DFLT);
 
-	mlxcx_ftbl_vlan_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
+	p->mldp_ftbl_vlan_size_shift = ddi_getprop(DDI_DEV_T_ANY, mlxp->mlx_dip,
 	    DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS, "ftbl_vlan_size_shift",
 	    MLXCX_FTBL_VLAN_SIZE_SHIFT_DFLT);
+
+	p->mldp_eq_check_interval_sec = ddi_getprop(DDI_DEV_T_ANY,
+	    mlxp->mlx_dip, DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS,
+	    "eq_check_interval_sec", MLXCX_EQ_CHECK_INTERVAL_SEC_DFLT);
+	p->mldp_cq_check_interval_sec = ddi_getprop(DDI_DEV_T_ANY,
+	    mlxp->mlx_dip, DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS,
+	    "cq_check_interval_sec", MLXCX_CQ_CHECK_INTERVAL_SEC_DFLT);
+	p->mldp_wq_check_interval_sec = ddi_getprop(DDI_DEV_T_ANY,
+	    mlxp->mlx_dip, DDI_PROP_CANSLEEP | DDI_PROP_DONTPASS,
+	    "wq_check_interval_sec", MLXCX_WQ_CHECK_INTERVAL_SEC_DFLT);
 }
 
 void
@@ -731,7 +723,6 @@ static void
 mlxcx_teardown_pages(mlxcx_t *mlxp)
 {
 	uint_t nzeros = 0;
-	const ddi_dma_cookie_t *ck;
 
 	mutex_enter(&mlxp->mlx_pagemtx);
 
@@ -745,7 +736,7 @@ mlxcx_teardown_pages(mlxcx_t *mlxp)
 		if (!mlxcx_cmd_return_pages(mlxp, req, pas, &ret)) {
 			mlxcx_warn(mlxp, "hardware refused to return pages, "
 			    "leaking %u remaining pages", mlxp->mlx_npages);
-			return;
+			goto out;
 		}
 
 		for (int32_t i = 0; i < ret; i++) {
@@ -776,7 +767,7 @@ mlxcx_teardown_pages(mlxcx_t *mlxp)
 				mlxcx_warn(mlxp, "hardware refused to return "
 				    "pages, leaking %u remaining pages",
 				    mlxp->mlx_npages);
-				return;
+				goto out;
 			}
 			delay(drv_usectohz(mlxcx_reclaim_delay));
 		}
@@ -784,6 +775,7 @@ mlxcx_teardown_pages(mlxcx_t *mlxp)
 
 	avl_destroy(&mlxp->mlx_pages);
 
+out:
 	mutex_exit(&mlxp->mlx_pagemtx);
 	mutex_destroy(&mlxp->mlx_pagemtx);
 }
@@ -798,7 +790,7 @@ mlxcx_eq_alloc_dma(mlxcx_t *mlxp, mlxcx_event_queue_t *mleq)
 
 	VERIFY0(mleq->mleq_state & MLXCX_EQ_ALLOC);
 
-	mleq->mleq_entshift = mlxcx_eq_size_shift;
+	mleq->mleq_entshift = mlxp->mlx_props.mldp_eq_size_shift;
 	mleq->mleq_nents = (1 << mleq->mleq_entshift);
 	sz = mleq->mleq_nents * sizeof (mlxcx_eventq_ent_t);
 	ASSERT3U(sz & (MLXCX_HW_PAGE_SIZE - 1), ==, 0);
@@ -890,7 +882,8 @@ mlxcx_teardown_ports(mlxcx_t *mlxp)
 
 	for (i = 0; i < mlxp->mlx_nports; ++i) {
 		p = &mlxp->mlx_ports[i];
-
+		if (!(p->mlp_init & MLXCX_PORT_INIT))
+			continue;
 		mutex_enter(&p->mlp_mtx);
 		if ((ft = p->mlp_rx_flow) != NULL) {
 			mutex_enter(&ft->mlft_mtx);
@@ -898,6 +891,7 @@ mlxcx_teardown_ports(mlxcx_t *mlxp)
 		}
 		mutex_exit(&p->mlp_mtx);
 		mutex_destroy(&p->mlp_mtx);
+		p->mlp_init &= ~MLXCX_PORT_INIT;
 	}
 
 	kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
@@ -953,9 +947,12 @@ mlxcx_teardown_eqs(mlxcx_t *mlxp)
 static void
 mlxcx_teardown_checktimers(mlxcx_t *mlxp)
 {
-	ddi_periodic_delete(mlxp->mlx_eq_checktimer);
-	ddi_periodic_delete(mlxp->mlx_cq_checktimer);
-	ddi_periodic_delete(mlxp->mlx_wq_checktimer);
+	if (mlxp->mlx_props.mldp_eq_check_interval_sec > 0)
+		ddi_periodic_delete(mlxp->mlx_eq_checktimer);
+	if (mlxp->mlx_props.mldp_cq_check_interval_sec > 0)
+		ddi_periodic_delete(mlxp->mlx_cq_checktimer);
+	if (mlxp->mlx_props.mldp_wq_check_interval_sec > 0)
+		ddi_periodic_delete(mlxp->mlx_wq_checktimer);
 }
 
 static void
@@ -1068,12 +1065,8 @@ mlxcx_teardown(mlxcx_t *mlxp)
 		mlxp->mlx_attach &= ~MLXCX_ATTACH_FM;
 	}
 
-	mutex_enter(&mlxcx_glock);
-	list_remove(&mlxcx_glist, mlxp);
-	mutex_exit(&mlxcx_glock);
-
 	VERIFY3S(mlxp->mlx_attach, ==, 0);
-	kmem_free(mlxp, sizeof (mlxcx_t));
+	ddi_soft_state_free(mlxcx_softstate, mlxp->mlx_inst);
 	ddi_set_driver_private(dip, NULL);
 }
 
@@ -1168,6 +1161,7 @@ mlxcx_give_pages(mlxcx_t *mlxp, int32_t npages)
 		    B_TRUE, MLXCX_HW_PAGE_SIZE, B_TRUE)) {
 			mlxcx_warn(mlxp, "failed to allocate 4k page %u/%u", i,
 			    npages);
+			kmem_free(mdp, sizeof (mlxcx_dev_page_t));
 			goto cleanup_npages;
 		}
 		ck = mlxcx_dma_cookie_one(&mdp->mxdp_dma);
@@ -1253,6 +1247,7 @@ mlxcx_bufs_cache_destr(void *arg, void *cookie)
 {
 	mlxcx_t *mlxp = cookie;
 	mlxcx_buffer_t *b = arg;
+	VERIFY3P(b->mlb_mlx, ==, mlxp);
 	VERIFY(b->mlb_state == MLXCX_BUFFER_INIT);
 	list_destroy(&b->mlb_tx_chain);
 }
@@ -1296,20 +1291,80 @@ mlxcx_setup_bufs(mlxcx_t *mlxp)
 }
 
 static void
+mlxcx_fm_qstate_ereport(mlxcx_t *mlxp, const char *qtype, uint32_t qnum,
+    const char *state, uint8_t statenum)
+{
+	uint64_t ena;
+	char buf[FM_MAX_CLASS];
+
+	if (!DDI_FM_EREPORT_CAP(mlxp->mlx_fm_caps))
+		return;
+
+	(void) snprintf(buf, FM_MAX_CLASS, "%s.%s",
+	    MLXCX_FM_SERVICE_MLXCX, "qstate.err");
+	ena = fm_ena_generate(0, FM_ENA_FMT1);
+
+	ddi_fm_ereport_post(mlxp->mlx_dip, buf, ena, DDI_NOSLEEP,
+	    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+	    "state", DATA_TYPE_STRING, state,
+	    "state_num", DATA_TYPE_UINT8, statenum,
+	    "qtype", DATA_TYPE_STRING, qtype,
+	    "qnum", DATA_TYPE_UINT32, qnum,
+	    NULL);
+	ddi_fm_service_impact(mlxp->mlx_dip, DDI_SERVICE_DEGRADED);
+}
+
+static void
 mlxcx_eq_check(void *arg)
 {
 	mlxcx_t *mlxp = (mlxcx_t *)arg;
 	mlxcx_event_queue_t *eq;
+	mlxcx_eventq_ctx_t ctx;
+	const char *str;
+
 	uint_t i;
 
 	for (i = 0; i < mlxp->mlx_intr_count; ++i) {
 		eq = &mlxp->mlx_eqs[i];
-		if (eq->mleq_state & MLXCX_EQ_CREATED &&
-		    !(eq->mleq_state & MLXCX_EQ_DESTROYED)) {
-			mutex_enter(&eq->mleq_mtx);
-			(void) mlxcx_cmd_query_eq(mlxp, eq);
+		if (!(eq->mleq_state & MLXCX_EQ_CREATED) ||
+		    (eq->mleq_state & MLXCX_EQ_DESTROYED))
+			continue;
+		mutex_enter(&eq->mleq_mtx);
+		if (!mlxcx_cmd_query_eq(mlxp, eq, &ctx)) {
 			mutex_exit(&eq->mleq_mtx);
+			continue;
 		}
+
+		str = "???";
+		switch (ctx.mleqc_status) {
+		case MLXCX_EQ_STATUS_OK:
+			break;
+		case MLXCX_EQ_STATUS_WRITE_FAILURE:
+			str = "WRITE_FAILURE";
+			break;
+		}
+		if (ctx.mleqc_status != MLXCX_EQ_STATUS_OK) {
+			mlxcx_fm_qstate_ereport(mlxp, "event",
+			    eq->mleq_num, str, ctx.mleqc_status);
+			mlxcx_warn(mlxp, "EQ %u is in bad status: %x (%s)",
+			    eq->mleq_intr_index, ctx.mleqc_status, str);
+		}
+
+		if (ctx.mleqc_state != MLXCX_EQ_ST_ARMED &&
+		    (eq->mleq_state & MLXCX_EQ_ARMED)) {
+			if (eq->mleq_cc == eq->mleq_check_disarm_cc &&
+			    ++eq->mleq_check_disarm_cnt >= 3) {
+				mlxcx_fm_ereport(mlxp, DDI_FM_DEVICE_STALL);
+				mlxcx_warn(mlxp, "EQ %u isn't armed",
+				    eq->mleq_intr_index);
+			}
+			eq->mleq_check_disarm_cc = eq->mleq_cc;
+		} else {
+			eq->mleq_check_disarm_cc = 0;
+			eq->mleq_check_disarm_cnt = 0;
+		}
+
+		mutex_exit(&eq->mleq_mtx);
 	}
 }
 
@@ -1318,16 +1373,160 @@ mlxcx_cq_check(void *arg)
 {
 	mlxcx_t *mlxp = (mlxcx_t *)arg;
 	mlxcx_completion_queue_t *cq;
+	mlxcx_completionq_ctx_t ctx;
+	const char *str, *type;
+	uint_t v;
 
 	for (cq = list_head(&mlxp->mlx_cqs); cq != NULL;
 	    cq = list_next(&mlxp->mlx_cqs, cq)) {
 		mutex_enter(&cq->mlcq_mtx);
-		if (cq->mlcq_state & MLXCX_CQ_CREATED &&
-		    !(cq->mlcq_state & MLXCX_CQ_DESTROYED) &&
-		    !(cq->mlcq_state & MLXCX_CQ_TEARDOWN)) {
-			(void) mlxcx_cmd_query_cq(mlxp, cq);
+		if (!(cq->mlcq_state & MLXCX_CQ_CREATED) ||
+		    (cq->mlcq_state & MLXCX_CQ_DESTROYED) ||
+		    (cq->mlcq_state & MLXCX_CQ_TEARDOWN)) {
+			mutex_exit(&cq->mlcq_mtx);
+			continue;
+		}
+		if (cq->mlcq_fm_repd_qstate) {
+			mutex_exit(&cq->mlcq_mtx);
+			continue;
+		}
+		if (!mlxcx_cmd_query_cq(mlxp, cq, &ctx)) {
+			mutex_exit(&cq->mlcq_mtx);
+			continue;
+		}
+		if (cq->mlcq_wq != NULL) {
+			mlxcx_work_queue_t *wq = cq->mlcq_wq;
+			if (wq->mlwq_type == MLXCX_WQ_TYPE_RECVQ)
+				type = "rx ";
+			else if (wq->mlwq_type == MLXCX_WQ_TYPE_SENDQ)
+				type = "tx ";
+			else
+				type = "";
+		} else {
+			type = "";
+		}
+
+		str = "???";
+		v = get_bits32(ctx.mlcqc_flags, MLXCX_CQ_CTX_STATUS);
+		switch (v) {
+		case MLXCX_CQC_STATUS_OK:
+			break;
+		case MLXCX_CQC_STATUS_OVERFLOW:
+			str = "OVERFLOW";
+			break;
+		case MLXCX_CQC_STATUS_WRITE_FAIL:
+			str = "WRITE_FAIL";
+			break;
+		case MLXCX_CQC_STATUS_INVALID:
+			str = "INVALID";
+			break;
+		}
+		if (v != MLXCX_CQC_STATUS_OK) {
+			mlxcx_fm_qstate_ereport(mlxp, "completion",
+			    cq->mlcq_num, str, v);
+			mlxcx_warn(mlxp, "%sCQ 0x%x is in bad status: %x (%s)",
+			    type, cq->mlcq_num, v, str);
+			cq->mlcq_fm_repd_qstate = B_TRUE;
+		}
+
+		v = get_bits32(ctx.mlcqc_flags, MLXCX_CQ_CTX_STATE);
+		if (v != MLXCX_CQC_STATE_ARMED &&
+		    (cq->mlcq_state & MLXCX_CQ_ARMED) &&
+		    !(cq->mlcq_state & MLXCX_CQ_POLLING)) {
+			if (cq->mlcq_cc == cq->mlcq_check_disarm_cc &&
+			    ++cq->mlcq_check_disarm_cnt >= 3) {
+				mlxcx_fm_ereport(mlxp, DDI_FM_DEVICE_STALL);
+				mlxcx_warn(mlxp, "%sCQ 0x%x (%p) isn't armed",
+				    type, cq->mlcq_num, cq);
+			}
+			cq->mlcq_check_disarm_cc = cq->mlcq_cc;
+		} else {
+			cq->mlcq_check_disarm_cnt = 0;
+			cq->mlcq_check_disarm_cc = 0;
 		}
 		mutex_exit(&cq->mlcq_mtx);
+	}
+}
+
+void
+mlxcx_check_sq(mlxcx_t *mlxp, mlxcx_work_queue_t *sq)
+{
+	mlxcx_sq_ctx_t ctx;
+	mlxcx_sq_state_t state;
+
+	ASSERT(mutex_owned(&sq->mlwq_mtx));
+
+	if (!mlxcx_cmd_query_sq(mlxp, sq, &ctx))
+		return;
+
+	ASSERT3U(from_be24(ctx.mlsqc_cqn), ==, sq->mlwq_cq->mlcq_num);
+	state = get_bits32(ctx.mlsqc_flags, MLXCX_SQ_STATE);
+	switch (state) {
+	case MLXCX_SQ_STATE_RST:
+		if (sq->mlwq_state & MLXCX_WQ_STARTED) {
+			mlxcx_fm_qstate_ereport(mlxp, "send",
+			    sq->mlwq_num, "RST", state);
+			sq->mlwq_fm_repd_qstate = B_TRUE;
+		}
+		break;
+	case MLXCX_SQ_STATE_RDY:
+		if (!(sq->mlwq_state & MLXCX_WQ_STARTED)) {
+			mlxcx_fm_qstate_ereport(mlxp, "send",
+			    sq->mlwq_num, "RDY", state);
+			sq->mlwq_fm_repd_qstate = B_TRUE;
+		}
+		break;
+	case MLXCX_SQ_STATE_ERR:
+		mlxcx_fm_qstate_ereport(mlxp, "send",
+		    sq->mlwq_num, "ERR", state);
+		sq->mlwq_fm_repd_qstate = B_TRUE;
+		break;
+	default:
+		mlxcx_fm_qstate_ereport(mlxp, "send",
+		    sq->mlwq_num, "???", state);
+		sq->mlwq_fm_repd_qstate = B_TRUE;
+		break;
+	}
+}
+
+void
+mlxcx_check_rq(mlxcx_t *mlxp, mlxcx_work_queue_t *rq)
+{
+	mlxcx_rq_ctx_t ctx;
+	mlxcx_rq_state_t state;
+
+	ASSERT(mutex_owned(&rq->mlwq_mtx));
+
+	if (!mlxcx_cmd_query_rq(mlxp, rq, &ctx))
+		return;
+
+	ASSERT3U(from_be24(ctx.mlrqc_cqn), ==, rq->mlwq_cq->mlcq_num);
+	state = get_bits32(ctx.mlrqc_flags, MLXCX_RQ_STATE);
+	switch (state) {
+	case MLXCX_RQ_STATE_RST:
+		if (rq->mlwq_state & MLXCX_WQ_STARTED) {
+			mlxcx_fm_qstate_ereport(mlxp, "receive",
+			    rq->mlwq_num, "RST", state);
+			rq->mlwq_fm_repd_qstate = B_TRUE;
+		}
+		break;
+	case MLXCX_RQ_STATE_RDY:
+		if (!(rq->mlwq_state & MLXCX_WQ_STARTED)) {
+			mlxcx_fm_qstate_ereport(mlxp, "receive",
+			    rq->mlwq_num, "RDY", state);
+			rq->mlwq_fm_repd_qstate = B_TRUE;
+		}
+		break;
+	case MLXCX_RQ_STATE_ERR:
+		mlxcx_fm_qstate_ereport(mlxp, "receive",
+		    rq->mlwq_num, "ERR", state);
+		rq->mlwq_fm_repd_qstate = B_TRUE;
+		break;
+	default:
+		mlxcx_fm_qstate_ereport(mlxp, "receive",
+		    rq->mlwq_num, "???", state);
+		rq->mlwq_fm_repd_qstate = B_TRUE;
+		break;
 	}
 }
 
@@ -1340,17 +1539,23 @@ mlxcx_wq_check(void *arg)
 	for (wq = list_head(&mlxp->mlx_wqs); wq != NULL;
 	    wq = list_next(&mlxp->mlx_wqs, wq)) {
 		mutex_enter(&wq->mlwq_mtx);
-		if (wq->mlwq_state & MLXCX_WQ_CREATED &&
-		    !(wq->mlwq_state & MLXCX_WQ_DESTROYED) &&
-		    !(wq->mlwq_state & MLXCX_WQ_TEARDOWN)) {
-			switch (wq->mlwq_type) {
-			case MLXCX_WQ_TYPE_SENDQ:
-				(void) mlxcx_cmd_query_sq(mlxp, wq);
-				break;
-			case MLXCX_WQ_TYPE_RECVQ:
-				(void) mlxcx_cmd_query_rq(mlxp, wq);
-				break;
-			}
+		if (!(wq->mlwq_state & MLXCX_WQ_CREATED) ||
+		    (wq->mlwq_state & MLXCX_WQ_DESTROYED) ||
+		    (wq->mlwq_state & MLXCX_WQ_TEARDOWN)) {
+			mutex_exit(&wq->mlwq_mtx);
+			continue;
+		}
+		if (wq->mlwq_fm_repd_qstate) {
+			mutex_exit(&wq->mlwq_mtx);
+			continue;
+		}
+		switch (wq->mlwq_type) {
+		case MLXCX_WQ_TYPE_SENDQ:
+			mlxcx_check_sq(mlxp, wq);
+			break;
+		case MLXCX_WQ_TYPE_RECVQ:
+			mlxcx_check_rq(mlxp, wq);
+			break;
 		}
 		mutex_exit(&wq->mlwq_mtx);
 	}
@@ -1359,12 +1564,21 @@ mlxcx_wq_check(void *arg)
 static boolean_t
 mlxcx_setup_checktimers(mlxcx_t *mlxp)
 {
-	mlxp->mlx_eq_checktimer = ddi_periodic_add(mlxcx_eq_check, mlxp,
-	    MLXCX_EQ_CHECK_INTERVAL_NSEC, mlxp->mlx_intr_pri);
-	mlxp->mlx_cq_checktimer = ddi_periodic_add(mlxcx_cq_check, mlxp,
-	    MLXCX_CQ_CHECK_INTERVAL_NSEC, mlxp->mlx_intr_pri);
-	mlxp->mlx_wq_checktimer = ddi_periodic_add(mlxcx_wq_check, mlxp,
-	    MLXCX_WQ_CHECK_INTERVAL_NSEC, mlxp->mlx_intr_pri);
+	if (mlxp->mlx_props.mldp_eq_check_interval_sec > 0) {
+		mlxp->mlx_eq_checktimer = ddi_periodic_add(mlxcx_eq_check, mlxp,
+		    mlxp->mlx_props.mldp_eq_check_interval_sec * 1000000000ULL,
+		    DDI_IPL_0);
+	}
+	if (mlxp->mlx_props.mldp_cq_check_interval_sec > 0) {
+		mlxp->mlx_cq_checktimer = ddi_periodic_add(mlxcx_cq_check, mlxp,
+		    mlxp->mlx_props.mldp_cq_check_interval_sec * 1000000000ULL,
+		    DDI_IPL_0);
+	}
+	if (mlxp->mlx_props.mldp_wq_check_interval_sec > 0) {
+		mlxp->mlx_wq_checktimer = ddi_periodic_add(mlxcx_wq_check, mlxp,
+		    mlxp->mlx_props.mldp_wq_check_interval_sec * 1000000000ULL,
+		    DDI_IPL_0);
+	}
 	return (B_TRUE);
 }
 
@@ -1374,6 +1588,7 @@ mlxcx_dmac_fe_compare(const void *arg0, const void *arg1)
 	const mlxcx_flow_entry_t *left = arg0;
 	const mlxcx_flow_entry_t *right = arg1;
 	int bcmpr;
+
 	bcmpr = memcmp(left->mlfe_dmac, right->mlfe_dmac,
 	    sizeof (left->mlfe_dmac));
 	if (bcmpr < 0)
@@ -1393,6 +1608,7 @@ mlxcx_grmac_compare(const void *arg0, const void *arg1)
 	const mlxcx_group_mac_t *left = arg0;
 	const mlxcx_group_mac_t *right = arg1;
 	int bcmpr;
+
 	bcmpr = memcmp(left->mlgm_mac, right->mlgm_mac,
 	    sizeof (left->mlgm_mac));
 	if (bcmpr < 0)
@@ -1407,6 +1623,7 @@ mlxcx_page_compare(const void *arg0, const void *arg1)
 {
 	const mlxcx_dev_page_t *p0 = arg0;
 	const mlxcx_dev_page_t *p1 = arg1;
+
 	if (p0->mxdp_pa < p1->mxdp_pa)
 		return (-1);
 	if (p0->mxdp_pa > p1->mxdp_pa)
@@ -1422,7 +1639,6 @@ mlxcx_setup_ports(mlxcx_t *mlxp)
 	mlxcx_flow_table_t *ft;
 	mlxcx_flow_group_t *fg;
 	mlxcx_flow_entry_t *fe;
-	char speedbuf[128];
 
 	VERIFY3U(mlxp->mlx_nports, >, 0);
 	mlxp->mlx_ports_size = mlxp->mlx_nports * sizeof (mlxcx_port_t);
@@ -1431,48 +1647,32 @@ mlxcx_setup_ports(mlxcx_t *mlxp)
 	for (i = 0; i < mlxp->mlx_nports; ++i) {
 		p = &mlxp->mlx_ports[i];
 		p->mlp_num = i;
+		p->mlp_init |= MLXCX_PORT_INIT;
 		mutex_init(&p->mlp_mtx, "mlx_port_mtx", MUTEX_DRIVER,
 		    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 		mutex_enter(&p->mlp_mtx);
 		if (!mlxcx_cmd_query_nic_vport_ctx(mlxp, p)) {
-			kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
-			mlxp->mlx_ports = NULL;
-			return (B_FALSE);
+			mutex_exit(&p->mlp_mtx);
+			goto err;
 		}
 		if (!mlxcx_cmd_query_port_mtu(mlxp, p)) {
-			kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
-			mlxp->mlx_ports = NULL;
-			return (B_FALSE);
+			mutex_exit(&p->mlp_mtx);
+			goto err;
 		}
 		if (!mlxcx_cmd_query_port_status(mlxp, p)) {
-			kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
-			mlxp->mlx_ports = NULL;
-			return (B_FALSE);
+			mutex_exit(&p->mlp_mtx);
+			goto err;
 		}
 		if (!mlxcx_cmd_query_port_speed(mlxp, p)) {
-			kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
-			mlxp->mlx_ports = NULL;
-			return (B_FALSE);
+			mutex_exit(&p->mlp_mtx);
+			goto err;
 		}
 		if (!mlxcx_cmd_modify_nic_vport_ctx(mlxp, p,
 		    MLXCX_MODIFY_NIC_VPORT_CTX_PROMISC)) {
-			kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
-			mlxp->mlx_ports = NULL;
-			return (B_FALSE);
+			mutex_exit(&p->mlp_mtx);
+			goto err;
 		}
 
-		speedbuf[0] = 0;
-		mlxcx_eth_proto_to_string(p->mlp_oper_proto,
-		    speedbuf, sizeof (speedbuf));
-		mlxcx_note(mlxp, "found ethernet port %u: max_mtu %u, "
-		    "mac %02x:%02x:%02x:%02x:%02x:%02x, status %s/%s, "
-		    "speed %s", i, p->mlp_max_mtu,
-		    p->mlp_mac_address[0], p->mlp_mac_address[1],
-		    p->mlp_mac_address[2], p->mlp_mac_address[3],
-		    p->mlp_mac_address[4], p->mlp_mac_address[5],
-		    mlxcx_port_status_string(p->mlp_admin_status),
-		    mlxcx_port_status_string(p->mlp_oper_status),
-		    speedbuf);
 		mutex_exit(&p->mlp_mtx);
 	}
 
@@ -1488,7 +1688,7 @@ mlxcx_setup_ports(mlxcx_t *mlxp)
 
 		ft->mlft_type = MLXCX_FLOW_TABLE_NIC_RX;
 		ft->mlft_port = p;
-		ft->mlft_entshift = mlxcx_ftbl_root_size_shift;
+		ft->mlft_entshift = mlxp->mlx_props.mldp_ftbl_root_size_shift;
 		if (ft->mlft_entshift > mlxp->mlx_caps->mlc_max_rx_ft_shift)
 			ft->mlft_entshift = mlxp->mlx_caps->mlc_max_rx_ft_shift;
 		ft->mlft_nents = (1 << ft->mlft_entshift);
@@ -1575,15 +1775,7 @@ mlxcx_setup_ports(mlxcx_t *mlxp)
 	return (B_TRUE);
 
 err:
-	for (i = 0; i < mlxp->mlx_nports; ++i) {
-		p = &mlxp->mlx_ports[i];
-		if ((ft = p->mlp_rx_flow) != NULL) {
-			mutex_enter(&ft->mlft_mtx);
-			mlxcx_teardown_flow_table(mlxp, ft);
-		}
-	}
-	kmem_free(mlxp->mlx_ports, mlxp->mlx_ports_size);
-	mlxp->mlx_ports = NULL;
+	mlxcx_teardown_ports(mlxp);
 	return (B_FALSE);
 }
 
@@ -1682,7 +1874,6 @@ mlxcx_remove_vlan_entry(mlxcx_t *mlxp, mlxcx_ring_group_t *g,
 	fe->mlfe_state &= ~MLXCX_FLOW_ENTRY_RESERVED;
 
 	kmem_free(v, sizeof (mlxcx_group_vlan_t));
-	v = NULL;
 
 	mutex_exit(&ft->mlft_mtx);
 	return (B_TRUE);
@@ -1802,6 +1993,11 @@ mlxcx_remove_all_umcast_entries(mlxcx_t *mlxp, mlxcx_port_t *port,
 			continue;
 		}
 
+		/*
+		 * There are no more ring groups left for this MAC (it wasn't
+		 * attached to any other groups since ndest == 0), so clean up
+		 * its flow entry.
+		 */
 		avl_remove(&port->mlp_dmac_fe, fe);
 		(void) mlxcx_cmd_delete_flow_table_entry(mlxp, fe);
 		list_destroy(&fe->mlfe_ring_groups);
@@ -1856,9 +2052,14 @@ mlxcx_remove_umcast_entry(mlxcx_t *mlxp, mlxcx_port_t *port,
 			mutex_exit(&ft->mlft_mtx);
 			return (B_FALSE);
 		}
+		mutex_exit(&ft->mlft_mtx);
 		return (B_TRUE);
 	}
 
+	/*
+	 * There are no more ring groups left for this MAC (it wasn't attached
+	 * to any other groups since ndest == 0), so clean up its flow entry.
+	 */
 	avl_remove(&port->mlp_dmac_fe, fe);
 	(void) mlxcx_cmd_delete_flow_table_entry(mlxp, fe);
 	list_destroy(&fe->mlfe_ring_groups);
@@ -1890,30 +2091,28 @@ mlxcx_add_umcast_entry(mlxcx_t *mlxp, mlxcx_port_t *port,
 
 	fe = avl_find(&port->mlp_dmac_fe, &probe, NULL);
 
-	if (fe != NULL)
-		goto addmac;
-
-	fg = port->mlp_umcast;
-	for (fe = list_head(&fg->mlfg_entries); fe != NULL;
-	    fe = list_next(&fg->mlfg_entries, fe)) {
-		if (!(fe->mlfe_state & MLXCX_FLOW_ENTRY_RESERVED)) {
-			found = B_TRUE;
-			break;
+	if (fe == NULL) {
+		fg = port->mlp_umcast;
+		for (fe = list_head(&fg->mlfg_entries); fe != NULL;
+		    fe = list_next(&fg->mlfg_entries, fe)) {
+			if (!(fe->mlfe_state & MLXCX_FLOW_ENTRY_RESERVED)) {
+				found = B_TRUE;
+				break;
+			}
 		}
-	}
-	if (!found) {
-		mutex_exit(&ft->mlft_mtx);
-		return (B_FALSE);
-	}
-	list_create(&fe->mlfe_ring_groups, sizeof (mlxcx_group_mac_t),
-	    offsetof(mlxcx_group_mac_t, mlgm_fe_entry));
-	fe->mlfe_state |= MLXCX_FLOW_ENTRY_RESERVED;
-	fe->mlfe_action = MLXCX_FLOW_ACTION_FORWARD;
-	bcopy(macaddr, fe->mlfe_dmac, sizeof (fe->mlfe_dmac));
+		if (!found) {
+			mutex_exit(&ft->mlft_mtx);
+			return (B_FALSE);
+		}
+		list_create(&fe->mlfe_ring_groups, sizeof (mlxcx_group_mac_t),
+		    offsetof(mlxcx_group_mac_t, mlgm_fe_entry));
+		fe->mlfe_state |= MLXCX_FLOW_ENTRY_RESERVED;
+		fe->mlfe_action = MLXCX_FLOW_ACTION_FORWARD;
+		bcopy(macaddr, fe->mlfe_dmac, sizeof (fe->mlfe_dmac));
 
-	avl_add(&port->mlp_dmac_fe, fe);
+		avl_add(&port->mlp_dmac_fe, fe);
+	}
 
-addmac:
 	fe->mlfe_dest[fe->mlfe_ndest++].mlfed_flow = group->mlg_rx_vlan_ft;
 	fe->mlfe_state |= MLXCX_FLOW_ENTRY_DIRTY;
 
@@ -1985,19 +2184,19 @@ mlxcx_setup_eq0(mlxcx_t *mlxp)
 	mleq->mleq_mlx = mlxp;
 	mleq->mleq_uar = &mlxp->mlx_uar;
 	mleq->mleq_events =
-	    (1 << MLXCX_EVENT_PAGE_REQUEST) |
-	    (1 << MLXCX_EVENT_PORT_STATE) |
-	    (1 << MLXCX_EVENT_INTERNAL_ERROR) |
-	    (1 << MLXCX_EVENT_PORT_MODULE) |
-	    (1 << MLXCX_EVENT_SENDQ_DRAIN) |
-	    (1 << MLXCX_EVENT_LAST_WQE) |
-	    (1 << MLXCX_EVENT_CQ_ERROR) |
-	    (1 << MLXCX_EVENT_WQ_CATASTROPHE) |
-	    (1 << MLXCX_EVENT_PAGE_FAULT) |
-	    (1 << MLXCX_EVENT_WQ_INVALID_REQ) |
-	    (1 << MLXCX_EVENT_WQ_ACCESS_VIOL) |
-	    (1 << MLXCX_EVENT_NIC_VPORT) |
-	    (1 << MLXCX_EVENT_DOORBELL_CONGEST);
+	    (1ULL << MLXCX_EVENT_PAGE_REQUEST) |
+	    (1ULL << MLXCX_EVENT_PORT_STATE) |
+	    (1ULL << MLXCX_EVENT_INTERNAL_ERROR) |
+	    (1ULL << MLXCX_EVENT_PORT_MODULE) |
+	    (1ULL << MLXCX_EVENT_SENDQ_DRAIN) |
+	    (1ULL << MLXCX_EVENT_LAST_WQE) |
+	    (1ULL << MLXCX_EVENT_CQ_ERROR) |
+	    (1ULL << MLXCX_EVENT_WQ_CATASTROPHE) |
+	    (1ULL << MLXCX_EVENT_PAGE_FAULT) |
+	    (1ULL << MLXCX_EVENT_WQ_INVALID_REQ) |
+	    (1ULL << MLXCX_EVENT_WQ_ACCESS_VIOL) |
+	    (1ULL << MLXCX_EVENT_NIC_VPORT) |
+	    (1ULL << MLXCX_EVENT_DOORBELL_CONGEST);
 	if (!mlxcx_cmd_create_eq(mlxp, mleq)) {
 		/* mlxcx_teardown_eqs() will clean this up */
 		mutex_exit(&mleq->mleq_mtx);
@@ -2021,6 +2220,7 @@ mlxcx_cq_compare(const void *arg0, const void *arg1)
 {
 	const mlxcx_completion_queue_t *left = arg0;
 	const mlxcx_completion_queue_t *right = arg1;
+
 	if (left->mlcq_num < right->mlcq_num) {
 		return (-1);
 	}
@@ -2049,8 +2249,9 @@ mlxcx_setup_eqs(mlxcx_t *mlxp)
 			mutex_exit(&mleq->mleq_mtx);
 			return (B_FALSE);
 		}
-		if (mlxcx_intrmod_period_usec != 0 && !mlxcx_cmd_set_int_mod(
-		    mlxp, i, mlxcx_intrmod_period_usec)) {
+		if (mlxp->mlx_props.mldp_intrmod_period_usec != 0 &&
+		    !mlxcx_cmd_set_int_mod(mlxp, i,
+		    mlxp->mlx_props.mldp_intrmod_period_usec)) {
 			mutex_exit(&mleq->mleq_mtx);
 			return (B_FALSE);
 		}
@@ -2197,14 +2398,14 @@ mlxcx_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	}
 
 	mlxcx_teardown(mlxp);
-	mlxcx_note(NULL, "detached driver (%p)", mlxp);
 	return (DDI_SUCCESS);
 }
 
 static size_t
 mlxcx_calc_rx_ngroups(mlxcx_t *mlxp)
 {
-	size_t ngroups = mlxcx_rx_ngroups_large + mlxcx_rx_ngroups_small;
+	size_t ngroups = mlxp->mlx_props.mldp_rx_ngroups_large +
+	    mlxp->mlx_props.mldp_rx_ngroups_small;
 	size_t tirlim, flowlim, gflowlim;
 
 	tirlim = mlxp->mlx_caps->mlc_max_tir / MLXCX_TIRS_PER_GROUP;
@@ -2238,19 +2439,24 @@ mlxcx_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
 	mlxcx_t *mlxp;
 	uint_t i;
+	int inst, ret;
 
 	if (cmd != DDI_ATTACH)
 		return (DDI_FAILURE);
 
-	mlxp = kmem_zalloc(sizeof (mlxcx_t), KM_SLEEP);
+	inst = ddi_get_instance(dip);
+	ret = ddi_soft_state_zalloc(mlxcx_softstate, inst);
+	if (ret != 0)
+		return (ret);
+
+	mlxp = ddi_get_soft_state(mlxcx_softstate, inst);
+	if (mlxp == NULL)
+		return (DDI_FAILURE);
 	mlxp->mlx_dip = dip;
-	mlxp->mlx_inst = ddi_get_instance(dip);
+	mlxp->mlx_inst = inst;
 	ddi_set_driver_private(dip, mlxp);
 
-	mutex_enter(&mlxcx_glock);
 	mlxcx_load_props(mlxp);
-	list_insert_tail(&mlxcx_glist, mlxp);
-	mutex_exit(&mlxcx_glock);
 
 	mlxcx_fm_init(mlxp);
 	mlxp->mlx_attach |= MLXCX_ATTACH_FM;
@@ -2409,7 +2615,7 @@ mlxcx_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	    sizeof (mlxcx_ring_group_t);
 	mlxp->mlx_rx_groups = kmem_zalloc(mlxp->mlx_rx_groups_size, KM_SLEEP);
 
-	mlxp->mlx_tx_ngroups = mlxcx_tx_ngroups;
+	mlxp->mlx_tx_ngroups = mlxp->mlx_props.mldp_tx_ngroups;
 	mlxp->mlx_tx_groups_size = mlxp->mlx_tx_ngroups *
 	    sizeof (mlxcx_ring_group_t);
 	mlxp->mlx_tx_groups = kmem_zalloc(mlxp->mlx_tx_groups_size, KM_SLEEP);
@@ -2446,8 +2652,6 @@ mlxcx_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto err;
 	}
 	mlxp->mlx_attach |= MLXCX_ATTACH_MAC_HDL;
-
-	mlxcx_note(mlxp, "attached driver ok (%p)", mlxp);
 
 	return (DDI_SUCCESS);
 
@@ -2506,14 +2710,16 @@ _init(void)
 {
 	int ret;
 
-	list_create(&mlxcx_glist, sizeof (mlxcx_t),
-	    offsetof(mlxcx_t, mlx_gentry));
-	mutex_init(&mlxcx_glock, NULL, MUTEX_DRIVER, NULL);
+	ret = ddi_soft_state_init(&mlxcx_softstate, sizeof (mlxcx_t), 0);
+	if (ret != 0) {
+		return (ret);
+	}
 
 	mac_init_ops(&mlxcx_dev_ops, MLXCX_MODULE_NAME);
 
 	if ((ret = mod_install(&mlxcx_modlinkage)) != DDI_SUCCESS) {
 		mac_fini_ops(&mlxcx_dev_ops);
+		ddi_soft_state_fini(&mlxcx_softstate);
 		return (ret);
 	}
 
@@ -2536,7 +2742,8 @@ _fini(void)
 	}
 
 	mac_fini_ops(&mlxcx_dev_ops);
-	mutex_destroy(&mlxcx_glock);
-	list_destroy(&mlxcx_glist);
+
+	ddi_soft_state_fini(&mlxcx_softstate);
+
 	return (DDI_SUCCESS);
 }

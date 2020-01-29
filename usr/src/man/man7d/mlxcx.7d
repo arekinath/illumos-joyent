@@ -20,8 +20,9 @@
 .Sh SYNOPSIS
 .Pa /dev/net/mlxcx*
 .Sh DESCRIPTION
-The \fBmlxcx\fR Mellanox ConnectX-4/5/6 Ethernet controller driver is a
-GLDv3 NIC driver for the ConnectX-4, ConnectX-4 Lx, ConnectX-5 and
+The
+.Sy mlxcx
+driver is a GLDv3 NIC driver for the ConnectX-4, ConnectX-4 Lx, ConnectX-5 and
 ConnectX-6 families of ethernet controllers from Mellanox.
 It supports the Data Link Provider Interface,
 .Xr dlpi 7P .
@@ -39,15 +40,23 @@ when using VNICs.
 Promiscuous access via
 .Xr snoop 1M and
 .Xr dlpi 7P
+.It
+LED control via
+.Xr dlpi 7P
+.It
+Transceiver information via
+.Xr dlpi 7P
 .El
 .Pp
 At this time, the driver does not support Large Send Offload (LSO), energy
 efficient Ethernet (EEE), or the use of flow control through hardware pause
 frames.
 .Sh CONFIGURATION
-The \fBmlxcx.conf\fR file contains user configurable parameters, including
-the ability to set the number of rings and groups advertised to MAC, the sizes
-of rings and groups, and the maximum number of MAC address filters available.
+The
+.Sy mlxcx.conf
+file contains user configurable parameters, including the ability to set the
+number of rings and groups advertised to MAC, the sizes of rings and groups,
+and the maximum number of MAC address filters available.
 .Sh PROPERTIES
 The driver supports the following device properties which may be tuned through
 its driver.conf file,
@@ -296,7 +305,7 @@ property determines the maximum delay after an event queue entry has been
 generated before an interrupt is raised.
 The delay is measured in microseconds.
 The default value is
-.Sy 30 .
+.Sy 10 .
 .Ed
 .It Sy tx_bind_threshold
 .Bd -filled -compact
@@ -320,31 +329,12 @@ The default value is
 .Ed
 .El
 .Sh FILES
-.ne 2
-.na
-\fB\fB/kernel/drv/amd64/mlxcx\fR\fR
-.ad
-64-bit kernel module x86 ELF kernel module
-.sp
-.ne 2
-.na
-\fB\fB/kernel/drv/mlxcx.conf\fR\fR
-.ad
+.Bl -tag -width Pa
+.It Pa /kernel/drv/amd64/mlxcx
+Device driver (x86)
+.It Pa /kernel/drv/mlxcx.conf
 Driver configuration file containing user-configurable options
-.Sh ATTRIBUTES
-See \fBattributes\fR(5) for a description of the following attributes:
-.sp
-.sp
-.TS
-box;
-l | l
-l | l .
-ATTRIBUTE TYPE	ATTRIBUTE VALUE
-_
-Architecture	SPARC, x86
-_
-Interface Stability	Uncommitted
-.TE
+.El
 .Sh SEE ALSO
 .Xr dladm 1M ,
 .Xr snoop 1M ,

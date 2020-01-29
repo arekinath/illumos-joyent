@@ -30,6 +30,8 @@ void
 mlxcx_intr_teardown(mlxcx_t *mlxp)
 {
 	int i;
+	int ret;
+
 	for (i = 0; i < mlxp->mlx_intr_count; ++i) {
 		mlxcx_event_queue_t *mleq = &mlxp->mlx_eqs[i];
 		mutex_enter(&mleq->mleq_mtx);
@@ -43,8 +45,10 @@ mlxcx_intr_teardown(mlxcx_t *mlxp)
 		mutex_exit(&mleq->mleq_mtx);
 		(void) ddi_intr_disable(mlxp->mlx_intr_handles[i]);
 		(void) ddi_intr_remove_handler(mlxp->mlx_intr_handles[i]);
-		if (ddi_intr_free(mlxp->mlx_intr_handles[i]) != DDI_SUCCESS) {
-			mlxcx_warn(mlxp, "failed to free interrupt %d", i);
+		ret = ddi_intr_free(mlxp->mlx_intr_handles[i]);
+		if (ret != DDI_SUCCESS) {
+			mlxcx_warn(mlxp, "failed to free interrupt %d: %d",
+			    i, ret);
 		}
 		mutex_destroy(&mleq->mleq_mtx);
 	}
@@ -73,9 +77,9 @@ mlxcx_eq_next(mlxcx_event_queue_t *mleq)
 	ci = mleq->mleq_cc & (mleq->mleq_nents - 1);
 
 	ent = &mleq->mleq_ent[ci];
-	(void) ddi_dma_sync(mleq->mleq_dma.mxdb_dma_handle,
-	    (char *)ent - (char *)mleq->mleq_ent,
-	    sizeof (mlxcx_eventq_ent_t), DDI_DMA_SYNC_FORCPU);
+	VERIFY0(ddi_dma_sync(mleq->mleq_dma.mxdb_dma_handle,
+	    (uintptr_t)ent - (uintptr_t)mleq->mleq_ent,
+	    sizeof (mlxcx_eventq_ent_t), DDI_DMA_SYNC_FORCPU));
 	ddi_fm_dma_err_get(mleq->mleq_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status == DDI_FM_OK && (ent->mleqe_owner & 1) == swowner) {
@@ -168,9 +172,9 @@ mlxcx_cq_next(mlxcx_completion_queue_t *mlcq)
 	ci = mlcq->mlcq_cc & (mlcq->mlcq_nents - 1);
 
 	ent = &mlcq->mlcq_ent[ci];
-	(void) ddi_dma_sync(mlcq->mlcq_dma.mxdb_dma_handle,
-	    (char *)ent - (char *)mlcq->mlcq_ent,
-	    sizeof (mlxcx_completionq_ent_t), DDI_DMA_SYNC_FORCPU);
+	VERIFY0(ddi_dma_sync(mlcq->mlcq_dma.mxdb_dma_handle,
+	    (uintptr_t)ent - (uintptr_t)mlcq->mlcq_ent,
+	    sizeof (mlxcx_completionq_ent_t), DDI_DMA_SYNC_FORCPU));
 	ddi_fm_dma_err_get(mlcq->mlcq_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status == DDI_FM_OK && (ent->mlcqe_owner & 1) == swowner) {
@@ -244,7 +248,7 @@ err:
 	ddi_fm_service_impact(mlxp->mlx_dip, DDI_SERVICE_LOST);
 }
 
-static const char *
+const char *
 mlxcx_event_name(mlxcx_event_t evt)
 {
 	switch (evt) {
@@ -336,9 +340,6 @@ mlxcx_update_link_state(mlxcx_t *mlxp, mlxcx_port_t *port)
 		ls = LINK_STATE_UNKNOWN;
 	}
 	mac_link_update(mlxp->mlx_mac_hdl, ls);
-	mlxcx_note(mlxp, "port %u now in state %s/%s, speed %s",
-	    port->mlp_num, mlxcx_port_status_string(port->mlp_admin_status),
-	    mlxcx_port_status_string(port->mlp_oper_status), speedbuf);
 
 	mutex_exit(&port->mlp_mtx);
 }
@@ -394,6 +395,9 @@ cleanup_npages:
 		mlxcx_dma_free(&mdp->mxdp_dma);
 		kmem_free(mdp, sizeof (mlxcx_dev_page_t));
 	}
+	/* Tell the hardware we had an allocation failure. */
+	(void) mlxcx_cmd_give_pages(mlxp, MLXCX_MANAGE_PAGES_OPMOD_ALLOC_FAIL,
+	    0, NULL);
 	mutex_exit(&mlxp->mlx_pagemtx);
 }
 
@@ -426,7 +430,7 @@ mlxcx_take_pages_once(mlxcx_t *mlxp, size_t npages)
 			mlxcx_dma_free(&mdp->mxdp_dma);
 			kmem_free(mdp, sizeof (mlxcx_dev_page_t));
 		} else {
-			mlxcx_panic(mlxp, "hardware returned a page "
+			mlxcx_warn(mlxp, "hardware returned a page "
 			    "with PA 0x%" PRIx64 " but we have no "
 			    "record of giving out such a page", pas[i]);
 		}
@@ -553,8 +557,6 @@ mlxcx_intr_0(caddr_t arg, caddr_t arg2)
 	mleq->mleq_state &= ~MLXCX_EQ_ARMED;
 
 	for (; ent != NULL; ent = mlxcx_eq_next(mleq)) {
-		mlxcx_note(mlxp, "int 0 event %s",
-		    mlxcx_event_name(ent->mleqe_event_type));
 		switch (ent->mleqe_event_type) {
 		case MLXCX_EVENT_PAGE_REQUEST:
 			VERIFY3U(from_be16(ent->mleqe_page_request.
@@ -615,7 +617,7 @@ mlxcx_rx_poll(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq, size_t bytelim)
 
 	ASSERT(mlcq->mlcq_state & MLXCX_CQ_POLLING);
 
-	nmp = (cmp = (mp = NULL));
+	nmp = cmp = mp = NULL;
 
 	cent = mlxcx_cq_next(mlcq);
 	for (; cent != NULL; cent = mlxcx_cq_next(mlcq)) {
@@ -653,7 +655,7 @@ mlxcx_rx_poll(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq, size_t bytelim)
 			goto nextcq;
 		}
 		list_remove(&mlcq->mlcq_buffers, buf);
-		--mlcq->mlcq_bufcnt;
+		atomic_dec_64(&mlcq->mlcq_bufcnt);
 
 		nmp = mlxcx_rx_completion(mlxp, mlcq, cent, buf);
 		if (nmp != NULL) {
@@ -662,7 +664,7 @@ mlxcx_rx_poll(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq, size_t bytelim)
 				cmp->b_next = nmp;
 				cmp = nmp;
 			} else {
-				mp = (cmp = nmp);
+				mp = cmp = nmp;
 			}
 		}
 nextcq:
@@ -693,7 +695,7 @@ mlxcx_intr_n(caddr_t arg, caddr_t arg2)
 	    !(mleq->mleq_state & MLXCX_EQ_CREATED) ||
 	    (mleq->mleq_state & MLXCX_EQ_DESTROYED)) {
 		mutex_exit(&mleq->mleq_mtx);
-		return (DDI_INTR_UNCLAIMED);
+		return (DDI_INTR_CLAIMED);
 	}
 
 	ent = mlxcx_eq_next(mleq);
@@ -705,7 +707,7 @@ mlxcx_intr_n(caddr_t arg, caddr_t arg2)
 			    mleq->mleq_intr_index]);
 		}
 		mutex_exit(&mleq->mleq_mtx);
-		return (DDI_INTR_UNCLAIMED);
+		return (DDI_INTR_CLAIMED);
 	}
 	mleq->mleq_badintrs = 0;
 
@@ -742,7 +744,7 @@ mlxcx_intr_n(caddr_t arg, caddr_t arg2)
 		 * as to avoid any possibility of racing against us here, so we
 		 * only have to consider mlxcx_rx_poll().
 		 */
-		atomic_inc_64(&mlcq->mlcq_ec);
+		atomic_inc_32(&mlcq->mlcq_ec);
 		atomic_and_uint(&mlcq->mlcq_state, ~MLXCX_CQ_ARMED);
 
 		if (mutex_tryenter(&mlcq->mlcq_mtx) == 0) {
@@ -766,7 +768,7 @@ mlxcx_intr_n(caddr_t arg, caddr_t arg2)
 			continue;
 		}
 
-		nmp = (cmp = (mp = NULL));
+		nmp = cmp = mp = NULL;
 		tellmac = B_FALSE;
 
 		cent = mlxcx_cq_next(mlcq);
@@ -787,6 +789,11 @@ mlxcx_intr_n(caddr_t arg, caddr_t arg2)
 			}
 
 lookagain:
+			/*
+			 * Generally the buffer we're looking for will be
+			 * at the front of the list, so this loop won't
+			 * need to look far.
+			 */
 			buf = list_head(&mlcq->mlcq_buffers);
 			found = B_FALSE;
 			while (buf != NULL) {
@@ -798,6 +805,16 @@ lookagain:
 				buf = list_next(&mlcq->mlcq_buffers, buf);
 			}
 			if (!found) {
+				/*
+				 * If there's any buffers waiting on the
+				 * buffers_b list, then merge those into
+				 * the main list and have another look.
+				 *
+				 * The wq enqueue routines push new buffers
+				 * into buffers_b so that they can avoid
+				 * taking the mlcq_mtx and blocking us for
+				 * every single packet.
+				 */
 				added = B_FALSE;
 				mutex_enter(&mlcq->mlcq_bufbmtx);
 				if (!list_is_empty(&mlcq->mlcq_buffers_b)) {
@@ -836,13 +853,19 @@ lookagain:
 						cmp->b_next = nmp;
 						cmp = nmp;
 					} else {
-						mp = (cmp = nmp);
+						mp = cmp = nmp;
 					}
 				}
 				break;
 			}
 
 nextcq:
+			/*
+			 * Update the "doorbell" consumer counter for the queue
+			 * every time. Unlike a UAR write, this is relatively
+			 * cheap and doesn't require us to go out on the bus
+			 * straight away (since it's our memory).
+			 */
 			mlcq->mlcq_doorbell->mlcqd_update_ci =
 			    to_be24(mlcq->mlcq_cc);
 
@@ -865,6 +888,12 @@ nextcq:
 			    mp, mlcq->mlcq_mac_gen);
 		}
 
+		/*
+		 * Updating the consumer counter for an EQ requires a write
+		 * to the UAR, which is possibly expensive.
+		 *
+		 * Try to do it only often enough to stop us wrapping around.
+		 */
 		if ((mleq->mleq_cc & 0x7) == 0)
 			mlxcx_update_eq(mlxp, mleq);
 	}
@@ -883,6 +912,7 @@ mlxcx_intr_setup(mlxcx_t *mlxp)
 	int nintrs = 0;
 	int navail = 0;
 	int types, i;
+	mlxcx_eventq_type_t eqt = MLXCX_EQ_TYPE_ANY;
 
 	ret = ddi_intr_get_supported_types(dip, &types);
 	if (ret != DDI_SUCCESS) {
@@ -944,6 +974,14 @@ mlxcx_intr_setup(mlxcx_t *mlxp)
 		return (B_FALSE);
 	}
 
+	/*
+	 * If we have enough interrupts, set their "type" fields so that we
+	 * avoid mixing RX and TX queues on the same EQs.
+	 */
+	if (mlxp->mlx_intr_count >= 8) {
+		eqt = MLXCX_EQ_TYPE_RX;
+	}
+
 	for (i = 1; i < mlxp->mlx_intr_count; ++i) {
 		mutex_init(&mlxp->mlx_eqs[i].mleq_mtx, "mlx_eq_mtx",
 		    MUTEX_DRIVER, DDI_INTR_PRI(mlxp->mlx_intr_pri));
@@ -951,6 +989,18 @@ mlxcx_intr_setup(mlxcx_t *mlxp)
 		    sizeof (mlxcx_completion_queue_t),
 		    offsetof(mlxcx_completion_queue_t, mlcq_eq_entry));
 		mlxp->mlx_eqs[i].mleq_intr_index = i;
+
+		mlxp->mlx_eqs[i].mleq_type = eqt;
+		/*
+		 * If eqt is still ANY, just leave it set to that
+		 * (no else here).
+		 */
+		if (eqt == MLXCX_EQ_TYPE_RX) {
+			eqt = MLXCX_EQ_TYPE_TX;
+		} else if (eqt == MLXCX_EQ_TYPE_TX) {
+			eqt = MLXCX_EQ_TYPE_RX;
+		}
+
 		ret = ddi_intr_add_handler(mlxp->mlx_intr_handles[i],
 		    mlxcx_intr_n, (caddr_t)mlxp, (caddr_t)&mlxp->mlx_eqs[i]);
 		if (ret != DDI_SUCCESS) {

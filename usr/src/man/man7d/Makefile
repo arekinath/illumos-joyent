@@ -83,7 +83,6 @@ _MANFILES=	aac.7d		\
 		lofi.7d		\
 		log.7d		\
 		mem.7d		\
-		mlxcx.7d	\
 		mpt_sas.7d	\
 		mr_sas.7d	\
 		msglog.7d	\
@@ -217,6 +216,7 @@ i386_MANFILES=	ahci.7d		\
 		iwi.7d		\
 		iwn.7d		\
 		mega_sas.7d	\
+		mlxcx.7d	\
 		npe.7d		\
 		ntxn.7d		\
 		nv_sata.7d	\

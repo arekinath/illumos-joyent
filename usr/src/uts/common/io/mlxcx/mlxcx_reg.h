@@ -22,6 +22,10 @@
 
 #include <mlxcx_endint.h>
 
+#if !defined(_BIT_FIELDS_HTOL) && !defined(_BIT_FIELDS_LTOH)
+#error "Need _BIT_FIELDS_HTOL or _BIT_FIELDS_LTOH"
+#endif
+
 /*
  * Register offsets.
  */
@@ -62,6 +66,7 @@
 /* Number of blue flame reg pairs per UAR */
 #define	MLXCX_BF_PER_UAR	2
 #define	MLXCX_BF_PER_UAR_MASK	0x1
+#define	MLXCX_BF_SIZE		0x100
 #define	MLXCX_BF_BASE		0x0800
 
 /* CSTYLED */
@@ -179,9 +184,6 @@ typedef struct {
 	uint8_t		mleqe_signature;
 	uint8_t		mleqe_owner;
 } mlxcx_eventq_ent_t;
-CTASSERT(offsetof(mlxcx_eventq_ent_t, mleqe_unknown_data) == 0x20);
-CTASSERT(offsetof(mlxcx_eventq_ent_t, mleqe_signature) == 0x3c + 2);
-CTASSERT(sizeof (mlxcx_eventq_ent_t) == 64);
 
 typedef enum {
 	MLXCX_CQE_L3_HDR_NONE		= 0x0,
@@ -213,8 +215,12 @@ typedef enum {
 	MLXCX_CQE_RX_HASH_NONE		= 0,
 	MLXCX_CQE_RX_HASH_IPv4		= 1,
 	MLXCX_CQE_RX_HASH_IPv6		= 2,
-	MLXCX_CQE_RX_HASH_IPSEC		= 3,
+	MLXCX_CQE_RX_HASH_IPSEC_SPI	= 3,
 } mlxcx_cqe_rx_hash_type_t;
+#define	MLXCX_CQE_RX_HASH_IP_SRC	(bitdef_t){0, 0x3}
+#define	MLXCX_CQE_RX_HASH_IP_DEST	(bitdef_t){2, (0x3 << 2)}
+#define	MLXCX_CQE_RX_HASH_L4_SRC	(bitdef_t){4, (0x3 << 4)}
+#define	MLXCX_CQE_RX_HASH_L4_DEST	(bitdef_t){6, (0x3 << 6)}
 
 typedef enum {
 	MLXCX_CQE_OP_REQ		= 0x0,
@@ -235,15 +241,6 @@ typedef enum {
 	MLXCX_CQE_FORMAT_INLINE_64	= 2,
 	MLXCX_CQE_FORMAT_COMPRESSED	= 3,
 } mlxcx_cqe_format_t;
-
-#define	MLXCX_CQE_RX_HASH_IP_SRC_MASK	0x3
-#define	MLXCX_CQE_RX_HASH_IP_SRC_SHIFT	0
-#define	MLXCX_CQE_RX_HASH_IP_DEST_MASK	(0x3 << 2)
-#define	MLXCX_CQE_RX_HASH_IP_DEST_SHIFT	2
-#define	MLXCX_CQE_RX_HASH_L4_SRC_MASK	(0x3 << 4)
-#define	MLXCX_CQE_RX_HASH_L4_SRC_SHIFT	4
-#define	MLXCX_CQE_RX_HASH_L4_DEST_MASK	(0x3 << 6)
-#define	MLXCX_CQE_RX_HASH_L4_DEST_SHIFT	6
 
 typedef enum {
 	MLXCX_CQE_OWNER_INIT		= 1
@@ -295,9 +292,6 @@ typedef struct {
 	};
 } mlxcx_completionq_error_ent_t;
 
-CTASSERT(offsetof(mlxcx_completionq_error_ent_t, mlcqee_byte_cnt) == 0x2C);
-CTASSERT(offsetof(mlxcx_completionq_error_ent_t, mlcqee_wqe_opcode) == 0x38);
-
 typedef struct {
 	uint8_t		mlcqe_tunnel_flags;
 	uint8_t		mlcqe_rsvd[3];
@@ -306,7 +300,7 @@ typedef struct {
 	uint16be_t	mlcqe_lro_tcp_win;
 	uint32be_t	mlcqe_lro_ack_seq_num;
 	uint32be_t	mlcqe_rx_hash_result;
-	uint8_t		mlcqe_rx_hash_type;
+	bits8_t		mlcqe_rx_hash_type;
 	uint8_t		mlcqe_ml_path;
 	uint8_t		mlcqe_rsvd2[2];
 	uint16be_t	mlcqe_checksum;
@@ -376,9 +370,6 @@ typedef struct {
 	};
 } mlxcx_completionq_ent_t;
 
-CTASSERT(sizeof (mlxcx_completionq_error_ent_t) ==
-    sizeof (mlxcx_completionq_ent_t));
-
 typedef struct {
 	uint8_t			mlcqe_data[64];
 	mlxcx_completionq_ent_t	mlcqe_ent;
@@ -431,7 +422,6 @@ typedef struct {
 	bits8_t		mlcs_flags;
 	uint32be_t	mlcs_immediate;
 } mlxcx_wqe_control_seg_t;
-CTASSERT(sizeof (mlxcx_wqe_control_seg_t) == (1 << 4));
 
 typedef enum {
 	MLXCX_SQE_ETH_CSFLAG_L4_CHECKSUM		= 1 << 7,
@@ -454,15 +444,12 @@ typedef struct {
 	bits16_t	mles_szflags;
 	uint8_t		mles_inline_headers[18];
 } mlxcx_wqe_eth_seg_t;
-CTASSERT(offsetof(mlxcx_wqe_eth_seg_t, mles_inline_headers) == 0x0e);
-CTASSERT(sizeof (mlxcx_wqe_eth_seg_t) == (1 << 5));
 
 typedef struct {
 	uint32be_t	mlds_byte_count;
 	uint32be_t	mlds_lkey;
 	uint64be_t	mlds_address;
 } mlxcx_wqe_data_seg_t;
-CTASSERT(sizeof (mlxcx_wqe_data_seg_t) == (1 << 4));
 
 #define	MLXCX_SENDQ_STRIDE_SHIFT	6
 
@@ -472,27 +459,23 @@ typedef struct {
 	mlxcx_wqe_data_seg_t		mlsqe_data[1];
 } mlxcx_sendq_ent_t;
 
-CTASSERT(sizeof (mlxcx_sendq_ent_t) == (1 << MLXCX_SENDQ_STRIDE_SHIFT));
-
 typedef struct {
 	uint64be_t			mlsqbf_qwords[8];
 } mlxcx_sendq_bf_t;
-
-CTASSERT(sizeof (mlxcx_sendq_bf_t) == (1 << MLXCX_SENDQ_STRIDE_SHIFT));
 
 typedef struct {
 	mlxcx_wqe_data_seg_t		mlsqe_data[4];
 } mlxcx_sendq_extra_ent_t;
 
-CTASSERT(sizeof (mlxcx_sendq_extra_ent_t) == (1 << MLXCX_SENDQ_STRIDE_SHIFT));
-
 #define	MLXCX_RECVQ_STRIDE_SHIFT	7
+/*
+ * Each mlxcx_wqe_data_seg_t is 1<<4 bytes long (there's a CTASSERT to verify
+ * this in mlxcx_cmd.c), so the number of pointers is 1 << (shift - 4).
+ */
 #define	MLXCX_RECVQ_MAX_PTRS		(1 << (MLXCX_RECVQ_STRIDE_SHIFT - 4))
 typedef struct {
 	mlxcx_wqe_data_seg_t		mlrqe_data[MLXCX_RECVQ_MAX_PTRS];
 } mlxcx_recvq_ent_t;
-
-CTASSERT(sizeof (mlxcx_recvq_ent_t) == (1 << MLXCX_RECVQ_STRIDE_SHIFT));
 
 /* CSTYLED */
 #define MLXCX_CQ_ARM_CI			(bitdef_t){ .bit_shift = 0, \
@@ -656,8 +639,6 @@ typedef struct mlxcx_workq_ctx {
 	uint8_t		mlwqc_rsvd6[152];
 	uint64be_t	mlwqc_pas[MLXCX_WORKQ_CTX_MAX_ADDRESSES];
 } mlxcx_workq_ctx_t;
-CTASSERT(offsetof(mlxcx_workq_ctx_t, mlwqc_dbr_addr) == 0x10);
-CTASSERT(offsetof(mlxcx_workq_ctx_t, mlwqc_pas) == 0xc0);
 
 #define	MLXCX_RQ_FLAGS_RLKEY			(1UL << 31)
 #define	MLXCX_RQ_FLAGS_SCATTER_FCS		(1 << 29)
@@ -684,8 +665,6 @@ typedef struct mlxcx_rq_ctx {
 	uint8_t		mlrqc_rsvd4[28];
 	mlxcx_workq_ctx_t	mlrqc_wq;
 } mlxcx_rq_ctx_t;
-CTASSERT(offsetof(mlxcx_rq_ctx_t, mlrqc_cqn) == 0x09);
-CTASSERT(offsetof(mlxcx_rq_ctx_t, mlrqc_wq) == 0x30);
 
 #define	MLXCX_SQ_FLAGS_RLKEY			(1UL << 31)
 #define	MLXCX_SQ_FLAGS_CD_MASTER		(1 << 30)
@@ -732,10 +711,6 @@ typedef struct mlxcx_sq_ctx {
 	uint24be_t	mlsqc_tis_num;
 	mlxcx_workq_ctx_t	mlsqc_wq;
 } mlxcx_sq_ctx_t;
-CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_cqn) == 0x09);
-CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_tis_lst_sz) == 0x20);
-CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_tis_num) == 0x2d);
-CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_wq) == 0x30);
 
 #define	MLXCX_NIC_VPORT_CTX_MAX_ADDRESSES	64
 
@@ -959,8 +934,6 @@ typedef struct {
 	uint24be_t	mltisc_transport_domain;
 	uint8_t		mltisc_rsvd3[120];
 } mlxcx_tis_ctx_t;
-CTASSERT(sizeof (mlxcx_tis_ctx_t) == 0xa0);
-CTASSERT(offsetof(mlxcx_tis_ctx_t, mltisc_transport_domain) == 0x25);
 
 #define	MLXCX_RQT_MAX_RQ_REFS		64
 
@@ -977,8 +950,7 @@ typedef struct {
 	uint8_t		mlrqtc_rsvd3[212];
 	mlxcx_rqtable_rq_ref_t	mlrqtc_rqref[MLXCX_RQT_MAX_RQ_REFS];
 } mlxcx_rqtable_ctx_t;
-CTASSERT(offsetof(mlxcx_rqtable_ctx_t, mlrqtc_max_size) == 0x16);
-CTASSERT(offsetof(mlxcx_rqtable_ctx_t, mlrqtc_rqref) == 0xF0);
+
 #pragma pack()
 
 typedef enum {
@@ -1596,10 +1568,6 @@ typedef struct {
 	uint8_t		mlxi_create_eq_rsvd3[176];
 	uint64be_t	mlxi_create_eq_pas[MLXCX_CREATE_QUEUE_MAX_PAGES];
 } mlxcx_cmd_create_eq_in_t;
-CTASSERT(offsetof(mlxcx_cmd_create_eq_in_t, mlxi_create_eq_event_bitmask) ==
-    0x58);
-CTASSERT(offsetof(mlxcx_cmd_create_eq_in_t, mlxi_create_eq_pas) == 0x110);
-CTASSERT(offsetof(mlxcx_cmd_create_eq_in_t, mlxi_create_eq_context) == 0x10);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_create_eq_head;
@@ -1690,7 +1658,6 @@ typedef struct {
 	uint8_t		mlxi_create_tir_rsvd[24];
 	mlxcx_tir_ctx_t	mlxi_create_tir_context;
 } mlxcx_cmd_create_tir_in_t;
-CTASSERT(offsetof(mlxcx_cmd_create_tir_in_t, mlxi_create_tir_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_create_tir_head;
@@ -1716,7 +1683,6 @@ typedef struct {
 	uint8_t		mlxi_create_tis_rsvd[24];
 	mlxcx_tis_ctx_t	mlxi_create_tis_context;
 } mlxcx_cmd_create_tis_in_t;
-CTASSERT(offsetof(mlxcx_cmd_create_tis_in_t, mlxi_create_tis_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_create_tis_head;
@@ -1749,8 +1715,6 @@ typedef struct {
 	uint32be_t	mlxo_query_special_ctxs_null_mkey;
 	uint8_t		mlxo_query_special_ctxs_rsvd2[12];
 } mlxcx_cmd_query_special_ctxs_out_t;
-CTASSERT(offsetof(mlxcx_cmd_query_special_ctxs_out_t,
-    mlxo_query_special_ctxs_resd_lkey) == 0x0c);
 
 typedef enum {
 	MLXCX_VPORT_TYPE_VNIC		= 0x0,
@@ -1873,8 +1837,6 @@ typedef struct {
 	uint8_t		mlxo_query_cq_rsvd2[192];
 	uint64be_t	mlxo_query_cq_pas[MLXCX_CREATE_QUEUE_MAX_PAGES];
 } mlxcx_cmd_query_cq_out_t;
-CTASSERT(offsetof(mlxcx_cmd_query_cq_out_t, mlxo_query_cq_context) == 0x10);
-CTASSERT(offsetof(mlxcx_cmd_query_cq_out_t, mlxo_query_cq_pas) == 0x110);
 
 typedef struct {
 	mlxcx_cmd_in_t	mlxi_create_rq_head;
@@ -1933,7 +1895,6 @@ typedef struct {
 	uint8_t		mlxo_query_rq_rsvd[24];
 	mlxcx_rq_ctx_t	mlxo_query_rq_context;
 } mlxcx_cmd_query_rq_out_t;
-CTASSERT(offsetof(mlxcx_cmd_query_rq_out_t, mlxo_query_rq_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_in_t	mlxi_destroy_rq_head;
@@ -1952,7 +1913,6 @@ typedef struct {
 	uint8_t		mlxi_create_sq_rsvd[24];
 	mlxcx_sq_ctx_t	mlxi_create_sq_context;
 } mlxcx_cmd_create_sq_in_t;
-CTASSERT(offsetof(mlxcx_cmd_create_sq_in_t, mlxi_create_sq_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_create_sq_head;
@@ -1984,7 +1944,6 @@ typedef struct {
 	uint8_t		mlxi_modify_sq_rsvd2[8];
 	mlxcx_sq_ctx_t	mlxi_modify_sq_context;
 } mlxcx_cmd_modify_sq_in_t;
-CTASSERT(offsetof(mlxcx_cmd_modify_sq_in_t, mlxi_modify_sq_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_modify_sq_head;
@@ -2003,7 +1962,6 @@ typedef struct {
 	uint8_t		mlxo_query_sq_rsvd[24];
 	mlxcx_sq_ctx_t	mlxo_query_sq_context;
 } mlxcx_cmd_query_sq_out_t;
-CTASSERT(offsetof(mlxcx_cmd_query_sq_out_t, mlxo_query_sq_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_in_t	mlxi_destroy_sq_head;
@@ -2022,7 +1980,6 @@ typedef struct {
 	uint8_t		mlxi_create_rqt_rsvd[24];
 	mlxcx_rqtable_ctx_t	mlxi_create_rqt_context;
 } mlxcx_cmd_create_rqt_in_t;
-CTASSERT(offsetof(mlxcx_cmd_create_rqt_in_t, mlxi_create_rqt_context) == 0x20);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_create_rqt_head;
@@ -2244,7 +2201,6 @@ typedef struct {
 	uint16be_t	mlrd_pmtu_oper_mtu;
 	uint8_t		mlrd_pmtu_rsvd5[2];
 } mlxcx_reg_pmtu_t;
-CTASSERT(offsetof(mlxcx_reg_pmtu_t, mlrd_pmtu_oper_mtu) == 0x0C);
 
 typedef enum {
 	MLXCX_PORT_STATUS_UP		= 1,
@@ -2298,8 +2254,7 @@ typedef enum {
 	MLXCX_PROTO_25GBASE_KR			= 1 << 28,
 	MLXCX_PROTO_25GBASE_SR			= 1 << 29,
 	MLXCX_PROTO_50GBASE_CR2			= 1 << 30,
-	/* XXX: these stop this appearing as a proper enum in mdb */
-	/* MLXCX_PROTO_50GBASE_KR2			= 1UL << 31, */
+	MLXCX_PROTO_50GBASE_KR2			= 1UL << 31,
 } mlxcx_eth_proto_t;
 
 typedef enum {
@@ -2333,10 +2288,6 @@ typedef struct {
 	bits32_t	mlrd_ptys_proto_partner_advert;
 	uint8_t		mlrd_ptys_rsvd7[12];
 } mlxcx_reg_ptys_t;
-CTASSERT(sizeof (mlxcx_reg_ptys_t) == 64);
-CTASSERT(offsetof(mlxcx_reg_ptys_t, mlrd_ptys_proto_cap) == 0x0c);
-CTASSERT(offsetof(mlxcx_reg_ptys_t, mlrd_ptys_proto_admin) == 0x18);
-CTASSERT(offsetof(mlxcx_reg_ptys_t, mlrd_ptys_proto_partner_advert) == 0x30);
 
 typedef enum {
 	MLXCX_LED_TYPE_BOTH		= 0x0,
@@ -2393,7 +2344,6 @@ typedef struct {
 	uint8_t		mlrd_mcia_rsvd3[4];
 	uint8_t		mlrd_mcia_data[48];
 } mlxcx_reg_mcia_t;
-CTASSERT(offsetof(mlxcx_reg_mcia_t, mlrd_mcia_data) == 0x10);
 
 typedef struct {
 	uint64be_t	mlppc_ieee_802_3_frames_tx;
@@ -2416,10 +2366,6 @@ typedef struct {
 	uint64be_t	mlppc_ieee_802_3_pause_rx;
 	uint64be_t	mlppc_ieee_802_3_pause_tx;
 } mlxcx_ppcnt_ieee_802_3_t;
-CTASSERT(offsetof(mlxcx_ppcnt_ieee_802_3_t,
-    mlppc_ieee_802_3_in_range_len_err) == 0x50);
-CTASSERT(offsetof(mlxcx_ppcnt_ieee_802_3_t,
-    mlppc_ieee_802_3_pause_tx) == 0x90);
 
 typedef struct {
 	uint64be_t	mlppc_rfc_2863_in_octets;
@@ -2483,8 +2429,6 @@ typedef struct {
 		mlxcx_ppcnt_phy_stats_t		mlrd_ppcnt_phy_stats;
 	};
 } mlxcx_reg_ppcnt_t;
-CTASSERT(sizeof (mlxcx_reg_ppcnt_t) == 256);
-CTASSERT(offsetof(mlxcx_reg_ppcnt_t, mlrd_ppcnt_data) == 0x08);
 
 typedef enum {
 	MLXCX_REG_PMTU		= 0x5003,
@@ -2519,18 +2463,12 @@ typedef struct {
 	uint32be_t	mlxi_access_register_argument;
 	mlxcx_register_data_t	mlxi_access_register_data;
 } mlxcx_cmd_access_register_in_t;
-CTASSERT(offsetof(mlxcx_cmd_access_register_in_t,
-    mlxi_access_register_argument) == 0x0C);
-CTASSERT(offsetof(mlxcx_cmd_access_register_in_t,
-    mlxi_access_register_data) == 0x10);
 
 typedef struct {
 	mlxcx_cmd_out_t	mlxo_access_register_head;
 	uint8_t		mlxo_access_register_rsvd[8];
 	mlxcx_register_data_t	mlxo_access_register_data;
 } mlxcx_cmd_access_register_out_t;
-CTASSERT(offsetof(mlxcx_cmd_access_register_out_t,
-    mlxo_access_register_data) == 0x10);
 
 #pragma pack()
 

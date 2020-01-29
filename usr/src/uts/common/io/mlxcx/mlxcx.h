@@ -40,6 +40,9 @@
 #include <sys/cpuvar.h>
 #include <sys/ethernet.h>
 
+#include <inet/ip.h>
+#include <inet/ip6.h>
+
 #include <sys/ddifm.h>
 #include <sys/fm/protocol.h>
 #include <sys/fm/util.h>
@@ -79,24 +82,14 @@ extern "C" {
 #define	MLXCX_RX_NGROUPS_SMALL_DFLT		256
 #define	MLXCX_RX_NRINGS_PER_SMALL_GROUP_DFLT	4
 
-extern uint_t mlxcx_rx_ngroups_large;
-extern uint_t mlxcx_rx_ngroups_small;
-extern uint_t mlxcx_rx_nrings_per_large_group;
-extern uint_t mlxcx_rx_nrings_per_small_group;
-
 #define	MLXCX_TX_NGROUPS_DFLT		1
 #define	MLXCX_TX_NRINGS_PER_GROUP_DFLT	64
-
-extern uint_t mlxcx_tx_ngroups;
-extern uint_t mlxcx_tx_nrings_per_group;
 
 /*
  * Queues will be sized to (1 << *Q_SIZE_SHIFT) entries long.
  */
 #define	MLXCX_EQ_SIZE_SHIFT_DFLT	9
 #define	MLXCX_CQ_SIZE_SHIFT_DFLT	10
-extern uint_t mlxcx_eq_size_shift;
-extern uint_t mlxcx_cq_size_shift;
 
 /*
  * Default to making SQs bigger than RQs for 9k MTU, since most packets will
@@ -104,8 +97,6 @@ extern uint_t mlxcx_cq_size_shift;
  */
 #define	MLXCX_SQ_SIZE_SHIFT_DFLT	11
 #define	MLXCX_RQ_SIZE_SHIFT_DFLT	10
-extern uint_t mlxcx_rq_size_shift;
-extern uint_t mlxcx_sq_size_shift;
 
 #define	MLXCX_CQ_HWM_GAP		16
 #define	MLXCX_CQ_LWM_GAP		24
@@ -119,37 +110,30 @@ extern uint_t mlxcx_sq_size_shift;
 #define	MLXCX_CQEMOD_COUNT_DFLT		\
 	(8 * ((1 << MLXCX_CQ_SIZE_SHIFT_DFLT) / 10))
 
-extern uint_t mlxcx_cqemod_period_usec;
-extern uint_t mlxcx_cqemod_count;
-
 /*
  * EQ interrupt moderation
  */
-#define	MLXCX_INTRMOD_PERIOD_USEC_DFLT	30
-extern uint_t mlxcx_intrmod_period_usec;
+#define	MLXCX_INTRMOD_PERIOD_USEC_DFLT	10
 
 /* Size of root flow tables */
 #define	MLXCX_FTBL_ROOT_SIZE_SHIFT_DFLT		12
-extern uint_t mlxcx_ftbl_root_size_shift;
 
 /* Size of 2nd level flow tables for VLAN filtering */
 #define	MLXCX_FTBL_VLAN_SIZE_SHIFT_DFLT		4
-extern uint_t mlxcx_ftbl_vlan_size_shift;
 
 /*
  * How big does an mblk have to be before we dma_bind() it instead of
  * bcopying?
  */
 #define	MLXCX_TX_BIND_THRESHOLD_DFLT	2048
-extern size_t mlxcx_tx_bind_threshold;
 
 /*
  * How often to check the status of completion queues for overflow and
  * other problems.
  */
-#define	MLXCX_WQ_CHECK_INTERVAL_NSEC		30000000000
-#define	MLXCX_CQ_CHECK_INTERVAL_NSEC		30000000000
-#define	MLXCX_EQ_CHECK_INTERVAL_NSEC		5000000000
+#define	MLXCX_WQ_CHECK_INTERVAL_SEC_DFLT		300
+#define	MLXCX_CQ_CHECK_INTERVAL_SEC_DFLT		300
+#define	MLXCX_EQ_CHECK_INTERVAL_SEC_DFLT		30
 
 #define	MLXCX_DOORBELL_TRIES_DFLT		3
 extern uint_t mlxcx_doorbell_tries;
@@ -230,7 +214,7 @@ typedef struct mlxcx_dev_page {
  * Data structure to keep track of all information related to the command queue.
  */
 typedef enum {
-	MLXCX_CMD_QUEUE_S_IDLE,
+	MLXCX_CMD_QUEUE_S_IDLE = 1,
 	MLXCX_CMD_QUEUE_S_BUSY,
 	MLXCX_CMD_QUEUE_S_BROKEN
 } mlxcx_cmd_queue_status_t;
@@ -301,8 +285,13 @@ typedef struct {
 	uint64_t		mlps_rx_drops;
 } mlxcx_port_stats_t;
 
+typedef enum {
+	MLXCX_PORT_INIT		= 1 << 0
+} mlxcx_port_init_t;
+
 typedef struct mlxcx_port {
 	kmutex_t		mlp_mtx;
+	mlxcx_port_init_t	mlp_init;
 	mlxcx_t			*mlp_mlx;
 	/*
 	 * XXX: mlp_num starts at zero, but it seems like the numbering we
@@ -313,7 +302,7 @@ typedef struct mlxcx_port {
 	uint_t			mlp_num;
 	mlxcx_port_flags_t	mlp_flags;
 	uint64_t		mlp_guid;
-	uint8_t			mlp_mac_address[6];
+	uint8_t			mlp_mac_address[ETHERADDRL];
 
 	uint_t			mlp_mtu;
 	uint_t			mlp_max_mtu;
@@ -344,22 +333,29 @@ typedef struct mlxcx_port {
 	mlxcx_module_error_type_t	mlp_last_moderr;
 } mlxcx_port_t;
 
+typedef enum {
+	MLXCX_EQ_TYPE_ANY,
+	MLXCX_EQ_TYPE_RX,
+	MLXCX_EQ_TYPE_TX
+} mlxcx_eventq_type_t;
+
 typedef struct mlxcx_event_queue {
 	kmutex_t		mleq_mtx;
 	mlxcx_t			*mleq_mlx;
 	mlxcx_eventq_state_t	mleq_state;
+	mlxcx_eventq_type_t	mleq_type;
 
 	mlxcx_dma_buffer_t	mleq_dma;
 
 	size_t			mleq_entshift;
 	size_t			mleq_nents;
 	mlxcx_eventq_ent_t	*mleq_ent;
-	uint64_t		mleq_cc;	/* consumer counter */
-	uint64_t		mleq_cc_armed;
+	uint32_t		mleq_cc;	/* consumer counter */
+	uint32_t		mleq_cc_armed;
 
-	uint64_t		mleq_events;
+	uint32_t		mleq_events;
 
-	uint64_t		mleq_badintrs;
+	uint32_t		mleq_badintrs;
 
 	/* Hardware eq number */
 	uint_t			mleq_num;
@@ -372,7 +368,7 @@ typedef struct mlxcx_event_queue {
 	/* Tree of CQn => mlxcx_completion_queue_t */
 	avl_tree_t		mleq_cqs;
 
-	uint64_t		mleq_check_disarm_cc;
+	uint32_t		mleq_check_disarm_cc;
 	uint_t			mleq_check_disarm_cnt;
 } mlxcx_event_queue_t;
 
@@ -461,10 +457,10 @@ typedef struct mlxcx_completion_queue {
 	size_t				mlcq_entshift;
 	size_t				mlcq_nents;
 	mlxcx_completionq_ent_t		*mlcq_ent;
-	uint64_t			mlcq_cc;	/* consumer counter */
-	uint64_t			mlcq_cc_armed;	/* cc at last arm */
-	uint64_t			mlcq_ec;	/* event counter */
-	uint64_t			mlcq_ec_armed;	/* ec at last arm */
+	uint32_t			mlcq_cc;	/* consumer counter */
+	uint32_t			mlcq_cc_armed;	/* cc at last arm */
+	uint32_t			mlcq_ec;	/* event counter */
+	uint32_t			mlcq_ec_armed;	/* ec at last arm */
 
 	mlxcx_dma_buffer_t		mlcq_doorbell_dma;
 	mlxcx_completionq_doorbell_t	*mlcq_doorbell;
@@ -646,15 +642,15 @@ typedef struct mlxcx_flow_entry {
 	mlxcx_flow_action_t		mlfe_action;
 
 	/* Criteria for match */
-	uint8_t				mlfe_smac[6];
-	uint8_t				mlfe_dmac[6];
+	uint8_t				mlfe_smac[ETHERADDRL];
+	uint8_t				mlfe_dmac[ETHERADDRL];
 
 	mlxcx_vlan_type_t		mlfe_vlan_type;
 	uint16_t			mlfe_vid;
 
 	uint_t				mlfe_ip_version;
-	uint8_t				mlfe_srcip[16];
-	uint8_t				mlfe_dstip[16];
+	uint8_t				mlfe_srcip[IPV6_ADDR_LEN];
+	uint8_t				mlfe_dstip[IPV6_ADDR_LEN];
 
 	uint_t				mlfe_ip_proto;
 	uint16_t			mlfe_sport;
@@ -728,8 +724,6 @@ typedef enum {
 
 	MLXCX_TIRS_PER_GROUP
 } mlxcx_tir_role_t;
-
-CTASSERT((1 << MLXCX_RX_HASH_FT_SIZE_SHIFT) >= MLXCX_TIRS_PER_GROUP);
 
 typedef struct {
 	avl_node_t		mlgm_group_entry;
@@ -855,6 +849,28 @@ typedef struct {
 	mlxcx_hca_cap_t		mlc_nic_flow_max;
 } mlxcx_caps_t;
 
+typedef struct {
+	uint_t			mldp_eq_size_shift;
+	uint_t			mldp_cq_size_shift;
+	uint_t			mldp_rq_size_shift;
+	uint_t			mldp_sq_size_shift;
+	uint_t			mldp_cqemod_period_usec;
+	uint_t			mldp_cqemod_count;
+	uint_t			mldp_intrmod_period_usec;
+	uint_t			mldp_rx_ngroups_large;
+	uint_t			mldp_rx_ngroups_small;
+	uint_t			mldp_rx_nrings_per_large_group;
+	uint_t			mldp_rx_nrings_per_small_group;
+	uint_t			mldp_tx_ngroups;
+	uint_t			mldp_tx_nrings_per_group;
+	uint_t			mldp_ftbl_root_size_shift;
+	size_t			mldp_tx_bind_threshold;
+	uint_t			mldp_ftbl_vlan_size_shift;
+	uint64_t		mldp_eq_check_interval_sec;
+	uint64_t		mldp_cq_check_interval_sec;
+	uint64_t		mldp_wq_check_interval_sec;
+} mlxcx_drv_props_t;
+
 typedef enum {
 	MLXCX_ATTACH_FM		= 1 << 0,
 	MLXCX_ATTACH_PCI_CONFIG	= 1 << 1,
@@ -882,6 +898,8 @@ struct mlxcx {
 	dev_info_t		*mlx_dip;
 	int			mlx_inst;
 	mlxcx_attach_progress_t	mlx_attach;
+
+	mlxcx_drv_props_t	mlx_props;
 
 	/*
 	 * Misc. data
@@ -1028,6 +1046,9 @@ extern void mlxcx_note(mlxcx_t *, const char *, ...);
 extern void mlxcx_panic(mlxcx_t *, const char *, ...);
 
 extern void mlxcx_fm_ereport(mlxcx_t *, const char *);
+
+extern void mlxcx_check_sq(mlxcx_t *, mlxcx_work_queue_t *);
+extern void mlxcx_check_rq(mlxcx_t *, mlxcx_work_queue_t *);
 
 /*
  * DMA Functions
@@ -1191,17 +1212,20 @@ extern boolean_t mlxcx_cmd_dealloc_tdom(mlxcx_t *, mlxcx_tdom_t *);
 
 extern boolean_t mlxcx_cmd_create_eq(mlxcx_t *, mlxcx_event_queue_t *);
 extern boolean_t mlxcx_cmd_destroy_eq(mlxcx_t *, mlxcx_event_queue_t *);
-extern boolean_t mlxcx_cmd_query_eq(mlxcx_t *, mlxcx_event_queue_t *);
+extern boolean_t mlxcx_cmd_query_eq(mlxcx_t *, mlxcx_event_queue_t *,
+    mlxcx_eventq_ctx_t *);
 
 extern boolean_t mlxcx_cmd_create_cq(mlxcx_t *, mlxcx_completion_queue_t *);
 extern boolean_t mlxcx_cmd_destroy_cq(mlxcx_t *, mlxcx_completion_queue_t *);
-extern boolean_t mlxcx_cmd_query_cq(mlxcx_t *, mlxcx_completion_queue_t *);
+extern boolean_t mlxcx_cmd_query_cq(mlxcx_t *, mlxcx_completion_queue_t *,
+    mlxcx_completionq_ctx_t *);
 
 extern boolean_t mlxcx_cmd_create_rq(mlxcx_t *, mlxcx_work_queue_t *);
 extern boolean_t mlxcx_cmd_start_rq(mlxcx_t *, mlxcx_work_queue_t *);
 extern boolean_t mlxcx_cmd_stop_rq(mlxcx_t *, mlxcx_work_queue_t *);
 extern boolean_t mlxcx_cmd_destroy_rq(mlxcx_t *, mlxcx_work_queue_t *);
-extern boolean_t mlxcx_cmd_query_rq(mlxcx_t *, mlxcx_work_queue_t *);
+extern boolean_t mlxcx_cmd_query_rq(mlxcx_t *, mlxcx_work_queue_t *,
+    mlxcx_rq_ctx_t *);
 
 extern boolean_t mlxcx_cmd_create_tir(mlxcx_t *, mlxcx_tir_t *);
 extern boolean_t mlxcx_cmd_destroy_tir(mlxcx_t *, mlxcx_tir_t *);
@@ -1210,7 +1234,8 @@ extern boolean_t mlxcx_cmd_create_sq(mlxcx_t *, mlxcx_work_queue_t *);
 extern boolean_t mlxcx_cmd_start_sq(mlxcx_t *, mlxcx_work_queue_t *);
 extern boolean_t mlxcx_cmd_stop_sq(mlxcx_t *, mlxcx_work_queue_t *);
 extern boolean_t mlxcx_cmd_destroy_sq(mlxcx_t *, mlxcx_work_queue_t *);
-extern boolean_t mlxcx_cmd_query_sq(mlxcx_t *, mlxcx_work_queue_t *);
+extern boolean_t mlxcx_cmd_query_sq(mlxcx_t *, mlxcx_work_queue_t *,
+    mlxcx_sq_ctx_t *);
 
 extern boolean_t mlxcx_cmd_create_tis(mlxcx_t *, mlxcx_tis_t *);
 extern boolean_t mlxcx_cmd_destroy_tis(mlxcx_t *, mlxcx_tis_t *);
@@ -1259,6 +1284,8 @@ extern void mlxcx_update_link_state(mlxcx_t *, mlxcx_port_t *);
 
 extern void mlxcx_eth_proto_to_string(mlxcx_eth_proto_t, char *, size_t);
 extern const char *mlxcx_port_status_string(mlxcx_port_status_t);
+
+extern const char *mlxcx_event_name(mlxcx_event_t);
 
 #ifdef __cplusplus
 }

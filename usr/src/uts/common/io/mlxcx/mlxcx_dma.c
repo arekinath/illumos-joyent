@@ -194,12 +194,12 @@ mlxcx_dma_qdbell_attr(mlxcx_t *mlxp, ddi_dma_attr_t *attrp)
 	attrp->dma_attr_addr_lo = 0x0;
 	attrp->dma_attr_addr_hi = UINT64_MAX;
 
-	attrp->dma_attr_count_max = 0xFFF;
+	attrp->dma_attr_count_max = MLXCX_QUEUE_DMA_PAGE_SIZE - 1;
 	attrp->dma_attr_align = 8;
 	attrp->dma_attr_burstsizes = 0x8;
 	attrp->dma_attr_minxfer = 1;
 	attrp->dma_attr_maxxfer = UINT16_MAX;
-	attrp->dma_attr_seg = 0xFFF;
+	attrp->dma_attr_seg = MLXCX_QUEUE_DMA_PAGE_SIZE - 1;
 	attrp->dma_attr_granular = 1;
 	attrp->dma_attr_sgllen = 1;
 
@@ -213,9 +213,12 @@ mlxcx_dma_qdbell_attr(mlxcx_t *mlxp, ddi_dma_attr_t *attrp)
 void
 mlxcx_dma_free(mlxcx_dma_buffer_t *mxdb)
 {
+	int ret;
+
 	if (mxdb->mxdb_flags & MLXCX_DMABUF_BOUND) {
 		VERIFY(mxdb->mxdb_dma_handle != NULL);
-		(void) ddi_dma_unbind_handle(mxdb->mxdb_dma_handle);
+		ret = ddi_dma_unbind_handle(mxdb->mxdb_dma_handle);
+		VERIFY3S(ret, ==, DDI_SUCCESS);
 		mxdb->mxdb_flags &= ~MLXCX_DMABUF_BOUND;
 		mxdb->mxdb_ncookies = 0;
 	}
@@ -315,6 +318,7 @@ mlxcx_dma_bind_mblk(mlxcx_t *mlxp, mlxcx_dma_buffer_t *mxdb,
 	    (MLXCX_DMABUF_FOREIGN | MLXCX_DMABUF_MEM_ALLOC));
 	ASSERT0(mxdb->mxdb_flags & MLXCX_DMABUF_BOUND);
 
+	ASSERT3U(off, <=, MBLKL(mp));
 	mxdb->mxdb_va = (caddr_t)(mp->b_rptr + off);
 	mxdb->mxdb_len = MBLKL(mp) - off;
 	mxdb->mxdb_flags |= MLXCX_DMABUF_FOREIGN;
@@ -426,13 +430,14 @@ mlxcx_dma_alloc_offset(mlxcx_t *mlxp, mlxcx_dma_buffer_t *mxdb,
 		mlxcx_dma_free(mxdb);
 		return (B_FALSE);
 	}
+
+	if (zero == B_TRUE)
+		bzero(mxdb->mxdb_va, len);
+
 	mxdb->mxdb_va += offset;
 	len -= offset;
 	mxdb->mxdb_len = len;
 	mxdb->mxdb_flags |= MLXCX_DMABUF_MEM_ALLOC;
-
-	if (zero == B_TRUE)
-		bzero(mxdb->mxdb_va, len);
 
 	ret = ddi_dma_addr_bind_handle(mxdb->mxdb_dma_handle, NULL,
 	    mxdb->mxdb_va, len, DDI_DMA_RDWR | flags, memcb, NULL, NULL,

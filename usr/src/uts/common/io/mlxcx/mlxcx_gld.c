@@ -68,6 +68,7 @@ mlxcx_speed_to_bits(mlxcx_eth_proto_t v)
 		return (25ULL * GBITS);
 	case MLXCX_PROTO_50GBASE_SR2:
 	case MLXCX_PROTO_50GBASE_CR2:
+	case MLXCX_PROTO_50GBASE_KR2:
 		return (50ULL * GBITS);
 	case MLXCX_PROTO_100GBASE_CR4:
 	case MLXCX_PROTO_100GBASE_SR4:
@@ -267,7 +268,6 @@ static int
 mlxcx_mac_txr_info(void *arg, uint_t id, mac_transceiver_info_t *infop)
 {
 	mlxcx_t *mlxp = arg;
-	int ret = 0;
 	mlxcx_module_status_t st;
 
 	if (!mlxcx_cmd_query_module_status(mlxp, id, &st, NULL))
@@ -287,7 +287,6 @@ mlxcx_mac_txr_read(void *arg, uint_t id, uint_t page, void *vbuf,
     size_t nbytes, off_t offset, size_t *nread)
 {
 	mlxcx_t *mlxp = arg;
-	mlxcx_port_t *port = &mlxp->mlx_ports[0];
 	mlxcx_register_data_t data;
 	uint8_t *buf = vbuf;
 	boolean_t ok;
@@ -351,6 +350,7 @@ static int
 mlxcx_mac_ring_stat(mac_ring_driver_t rh, uint_t stat, uint64_t *val)
 {
 	mlxcx_work_queue_t *wq = (mlxcx_work_queue_t *)rh;
+	(void)wq;
 
 	/* XXX: use hw flow counters to get stats here? */
 
@@ -367,6 +367,7 @@ static int
 mlxcx_mac_start(void *arg)
 {
 	mlxcx_t *mlxp = (mlxcx_t *)arg;
+	(void) mlxp;
 	return (0);
 }
 
@@ -374,6 +375,7 @@ static void
 mlxcx_mac_stop(void *arg)
 {
 	mlxcx_t *mlxp = (mlxcx_t *)arg;
+	(void) mlxp;
 }
 
 static mblk_t *
@@ -382,11 +384,11 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 	mlxcx_work_queue_t *sq = (mlxcx_work_queue_t *)arg;
 	mlxcx_t *mlxp = sq->mlwq_mlx;
 	mlxcx_completion_queue_t *cq;
-	mlxcx_buffer_t *b, *bf;
+	mlxcx_buffer_t *b;
 	mac_header_info_t mhi;
 	mblk_t *kmp, *nmp;
 	uint8_t inline_hdrs[MLXCX_MAX_INLINE_HEADERLEN];
-	size_t inline_hdrlen, rem, off, npkts;
+	size_t inline_hdrlen, rem, off;
 	uint32_t chkflags = 0;
 	boolean_t ok;
 	size_t take = 0;
@@ -401,7 +403,7 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 		return (NULL);
 	}
 
-	inline_hdrlen = (rem = mhi.mhi_hdrsize);
+	inline_hdrlen = rem = mhi.mhi_hdrsize;
 
 	kmp = mp;
 	off = 0;
@@ -685,7 +687,6 @@ mlxcx_mac_ring_stop(mac_ring_driver_t rh)
 {
 	mlxcx_work_queue_t *wq = (mlxcx_work_queue_t *)rh;
 	mlxcx_completion_queue_t *cq = wq->mlwq_cq;
-	mlxcx_ring_group_t *g = wq->mlwq_group;
 	mlxcx_t *mlxp = wq->mlwq_mlx;
 	mlxcx_buf_shard_t *s;
 	mlxcx_buffer_t *buf;
@@ -831,7 +832,6 @@ static int
 mlxcx_mac_ring_intr_disable(mac_intr_handle_t intrh)
 {
 	mlxcx_completion_queue_t *cq = (mlxcx_completion_queue_t *)intrh;
-	mlxcx_t *mlxp = cq->mlcq_mlx;
 
 	atomic_or_uint(&cq->mlcq_state, MLXCX_CQ_POLLING);
 	mutex_enter(&cq->mlcq_mtx);
@@ -1019,8 +1019,10 @@ mlxcx_mac_propinfo(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 		break;
 	case MAC_PROP_MTU:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_RW);
-		mac_prop_info_set_range_uint32(prh, 22, port->mlp_max_mtu);
-		mac_prop_info_set_default_uint32(prh, port->mlp_mtu - 22);
+		mac_prop_info_set_range_uint32(prh, MLXCX_MTU_OFFSET,
+		    port->mlp_max_mtu);
+		mac_prop_info_set_default_uint32(prh,
+		    port->mlp_mtu - MLXCX_MTU_OFFSET);
 		break;
 	case MAC_PROP_AUTONEG:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
@@ -1204,8 +1206,8 @@ mlxcx_register_mac(mlxcx_t *mlxp)
 	mac->m_dip = mlxp->mlx_dip;
 	mac->m_src_addr = port->mlp_mac_address;
 	mac->m_callbacks = &mlxcx_mac_callbacks;
-	mac->m_min_sdu = 22;
-	mac->m_max_sdu = port->mlp_mtu - 22;
+	mac->m_min_sdu = MLXCX_MTU_OFFSET;
+	mac->m_max_sdu = port->mlp_mtu - MLXCX_MTU_OFFSET;
 	mac->m_margin = VLAN_TAGSZ;
 	mac->m_priv_props = mlxcx_priv_props;
 	mac->m_v12n = MAC_VIRT_LEVEL1;

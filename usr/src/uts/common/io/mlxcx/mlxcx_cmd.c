@@ -410,7 +410,7 @@ mlxcx_port_status_string(mlxcx_port_status_t st)
 	case MLXCX_PORT_STATUS_DISABLED:
 		return ("DISABLED");
 	default:
-		return ("???");
+		return ("UNKNOWN");
 	}
 }
 
@@ -459,6 +459,7 @@ mlxcx_eth_proto_to_string(mlxcx_eth_proto_t p, char *buf, size_t size)
 		(void) strlcat(buf, "25GBASE_SR|", size);
 	if (p & MLXCX_PROTO_50GBASE_CR2)
 		(void) strlcat(buf, "50GBASE_CR2|", size);
+	/* Chop off the trailing '|' */
 	if (strlen(buf) > 0)
 		buf[strlen(buf) - 1] = '\0';
 }
@@ -467,6 +468,10 @@ void
 mlxcx_cmd_queue_fini(mlxcx_t *mlxp)
 {
 	mlxcx_cmd_queue_t *cmd = &mlxp->mlx_cmd;
+
+	mutex_enter(&cmd->mcmd_lock);
+	VERIFY3S(cmd->mcmd_status, ==, MLXCX_CMD_QUEUE_S_IDLE);
+	mutex_exit(&cmd->mcmd_lock);
 
 	if (cmd->mcmd_tokens != NULL) {
 		id_space_destroy(cmd->mcmd_tokens);
@@ -477,6 +482,11 @@ mlxcx_cmd_queue_fini(mlxcx_t *mlxp)
 		ddi_taskq_destroy(cmd->mcmd_taskq);
 		cmd->mcmd_taskq = NULL;
 	}
+
+	cv_destroy(&cmd->mcmd_cv);
+	mutex_destroy(&cmd->mcmd_lock);
+
+	cmd->mcmd_ent = NULL;
 	mlxcx_dma_free(&cmd->mcmd_dma);
 }
 
@@ -509,6 +519,10 @@ mlxcx_cmd_queue_init(mlxcx_t *mlxp)
 	cmd->mcmd_size_l2 = MLXCX_ISS_CMDQ_SIZE(cmd_low);
 	cmd->mcmd_stride_l2 = MLXCX_ISS_CMDQ_STRIDE(cmd_low);
 
+	mutex_init(&cmd->mcmd_lock, "mlxcx_cmd_queue_lock", MUTEX_DRIVER, NULL);
+	cv_init(&cmd->mcmd_cv, "mlxcx_cmd_queue_cv", CV_DRIVER, NULL);
+	cmd->mcmd_status = MLXCX_CMD_QUEUE_S_IDLE;
+
 	(void) snprintf(buf, sizeof (buf), "mlxcx_tokens_%d", mlxp->mlx_inst);
 	if ((cmd->mcmd_tokens = id_space_create(buf, 1, UINT8_MAX)) == NULL) {
 		mlxcx_warn(mlxp, "failed to allocate token id space");
@@ -530,6 +544,7 @@ mlxcx_cmd_queue_init(mlxcx_t *mlxp)
 	if (!mlxcx_dma_alloc(mlxp, &cmd->mcmd_dma, &attr, &acc, B_TRUE,
 	    MLXCX_CMD_DMA_PAGE_SIZE, B_TRUE)) {
 		mlxcx_warn(mlxp, "failed to allocate command dma buffer");
+		mlxcx_cmd_queue_fini(mlxp);
 		return (B_FALSE);
 	}
 
@@ -590,6 +605,10 @@ mlxcx_cmd_mbox_alloc(mlxcx_t *mlxp, list_t *listp, uint8_t nblocks)
 			mlxcx_warn(mlxp, "failed to allocate mailbox dma "
 			    "buffer");
 			kmem_free(mbox, sizeof (*mbox));
+			/*
+			 * mlxcx_cmd_fini will clean up any mboxes that we
+			 * already placed onto listp.
+			 */
 			return (B_FALSE);
 		}
 		mbox->mlbox_data = (void *)mbox->mlbox_dma.mxdb_va;
@@ -662,7 +681,7 @@ mlxcx_cmd_prep_input(mlxcx_cmd_ent_t *ent, mlxcx_cmd_t *cmd)
 	mbox = list_head(&cmd->mlcmd_mbox_in);
 	ck = mlxcx_dma_cookie_one(&mbox->mlbox_dma);
 	ent->mce_in_mbox = to_be64(ck->dmac_laddress);
-	for (i = 0, mbox = list_head(&cmd->mlcmd_mbox_in); mbox != NULL;
+	for (i = 0; mbox != NULL;
 	    mbox = list_next(&cmd->mlcmd_mbox_in, mbox), i++) {
 		mlxcx_cmd_mbox_t *next;
 		mlxcx_cmd_mailbox_t *mp = mbox->mlbox_data;
@@ -808,7 +827,7 @@ mlxcx_cmd_taskq(void *arg)
 
 	/*
 	 * Command is done (or timed out). Save relevant data. Once we broadcast
-	 * on the CV and drop the lock, we must not touch it again.
+	 * on the CV and drop the lock, we must not touch the cmd again.
 	 */
 	mutex_enter(&cmd->mlcmd_lock);
 
@@ -855,7 +874,7 @@ mlxcx_cmd_send(mlxcx_t *mlxp, mlxcx_cmd_t *cmd, const void *in, uint32_t inlen,
 		cmd->mlcmd_nboxes_in = nblocks;
 	}
 
-	if (outlen > MLXCX_CMD_INLINE_INPUT_LEN) {
+	if (outlen > MLXCX_CMD_INLINE_OUTPUT_LEN) {
 		uint32_t need = outlen - MLXCX_CMD_INLINE_INPUT_LEN;
 		uint8_t nblocks;
 
@@ -1330,9 +1349,9 @@ mlxcx_cmd_alloc_uar(mlxcx_t *mlxp, mlxcx_uar_t *mlup)
 
 		for (i = 0; i < MLXCX_BF_PER_UAR; ++i) {
 			mlup->mlu_bf[i].mbf_even = mlup->mlu_base +
-			    MLXCX_BF_BASE + 0x100 * 2 * i;
+			    MLXCX_BF_BASE + MLXCX_BF_SIZE * 2 * i;
 			mlup->mlu_bf[i].mbf_odd = mlup->mlu_bf[i].mbf_even +
-			    0x100;
+			    MLXCX_BF_SIZE;
 		}
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
@@ -1364,6 +1383,7 @@ mlxcx_cmd_dealloc_uar(mlxcx_t *mlxp, mlxcx_uar_t *mlup)
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
 	if (ret) {
 		mlup->mlu_allocated = B_FALSE;
+		mlup->mlu_num = 0;
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
@@ -1423,6 +1443,7 @@ mlxcx_cmd_dealloc_pd(mlxcx_t *mlxp, mlxcx_pd_t *mlpd)
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
 	if (ret) {
 		mlpd->mlpd_allocated = B_FALSE;
+		mlpd->mlpd_num = 0;
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
@@ -1482,6 +1503,7 @@ mlxcx_cmd_dealloc_tdom(mlxcx_t *mlxp, mlxcx_tdom_t *mltd)
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
 	if (ret) {
 		mltd->mltd_allocated = B_FALSE;
+		mltd->mltd_num = 0;
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
@@ -1564,6 +1586,14 @@ mlxcx_reg_name(mlxcx_register_id_t rid)
 		return ("PTYS");
 	case MLXCX_REG_MSGI:
 		return ("MSGI");
+	case MLXCX_REG_PMAOS:
+		return ("PMAOS");
+	case MLXCX_REG_MLCR:
+		return ("MLCR");
+	case MLXCX_REG_MCIA:
+		return ("MCIA");
+	case MLXCX_REG_PPCNT:
+		return ("PPCNT");
 	default:
 		return ("???");
 	}
@@ -1610,7 +1640,6 @@ mlxcx_cmd_access_register(mlxcx_t *mlxp, mlxcx_cmd_reg_opmod_t opmod,
 	case MLXCX_REG_PPCNT:
 		dsize = sizeof (mlxcx_reg_ppcnt_t);
 		break;
-	case MLXCX_REG_MSGI:
 	default:
 		dsize = 0;
 		VERIFY(0);
@@ -1646,6 +1675,10 @@ mlxcx_cmd_query_port_mtu(mlxcx_t *mlxp, mlxcx_port_t *mlp)
 	mlxcx_register_data_t data;
 	boolean_t ret;
 
+	/*
+	 * Since we modify the port here we require that the caller is holding
+	 * the port mutex.
+	 */
 	ASSERT(mutex_owned(&mlp->mlp_mtx));
 	bzero(&data, sizeof (data));
 	data.mlrd_pmtu.mlrd_pmtu_local_port = mlp->mlp_num + 1;
@@ -1676,9 +1709,9 @@ mlxcx_cmd_query_module_status(mlxcx_t *mlxp, uint_t id,
 	    MLXCX_REG_PMAOS, &data);
 
 	if (ret) {
-		if (pstatus)
+		if (pstatus != NULL)
 			*pstatus = data.mlrd_pmaos.mlrd_pmaos_oper_status;
-		if (perr)
+		if (perr != NULL)
 			*perr = data.mlrd_pmaos.mlrd_pmaos_error_type;
 	}
 
@@ -1884,36 +1917,13 @@ mlxcx_cmd_create_eq(mlxcx_t *mlxp, mlxcx_event_queue_t *mleq)
 	return (ret);
 }
 
-static void
-mlxcx_fm_qstate_ereport(mlxcx_t *mlxp, const char *qtype, uint32_t qnum,
-    const char *state, uint8_t statenum)
-{
-	uint64_t ena;
-	char buf[FM_MAX_CLASS];
-
-	(void) snprintf(buf, FM_MAX_CLASS, "%s.%s",
-	    MLXCX_FM_SERVICE_MLXCX, "qstate.err");
-	ena = fm_ena_generate(0, FM_ENA_FMT1);
-	if (!DDI_FM_EREPORT_CAP(mlxp->mlx_fm_caps))
-		return;
-
-	ddi_fm_ereport_post(mlxp->mlx_dip, buf, ena, DDI_NOSLEEP,
-	    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
-	    "state", DATA_TYPE_STRING, state,
-	    "state_num", DATA_TYPE_UINT8, statenum,
-	    "qtype", DATA_TYPE_STRING, qtype,
-	    "qnum", DATA_TYPE_UINT32, qnum,
-	    NULL);
-	ddi_fm_service_impact(mlxp->mlx_dip, DDI_SERVICE_DEGRADED);
-}
-
 boolean_t
-mlxcx_cmd_query_eq(mlxcx_t *mlxp, mlxcx_event_queue_t *mleq)
+mlxcx_cmd_query_eq(mlxcx_t *mlxp, mlxcx_event_queue_t *mleq,
+    mlxcx_eventq_ctx_t *ctxp)
 {
 	mlxcx_cmd_t cmd;
 	mlxcx_cmd_query_eq_in_t in;
 	mlxcx_cmd_query_eq_out_t out;
-	mlxcx_eventq_ctx_t *ctx;
 	boolean_t ret;
 
 	bzero(&in, sizeof (in));
@@ -1937,37 +1947,8 @@ mlxcx_cmd_query_eq(mlxcx_t *mlxp, mlxcx_event_queue_t *mleq)
 
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
 	if (ret) {
-		const char *str;
-
-		ctx = &out.mlxo_query_eq_context;
-		str = "???";
-		switch (ctx->mleqc_status) {
-		case MLXCX_EQ_STATUS_OK:
-			break;
-		case MLXCX_EQ_STATUS_WRITE_FAILURE:
-			str = "WRITE_FAILURE";
-			break;
-		}
-		if (ctx->mleqc_status != MLXCX_EQ_STATUS_OK) {
-			mlxcx_fm_qstate_ereport(mlxp, "event",
-			    mleq->mleq_num, str, ctx->mleqc_status);
-			mlxcx_warn(mlxp, "EQ %u is in bad status: %x (%s)",
-			    mleq->mleq_intr_index, ctx->mleqc_status, str);
-		}
-
-		if (ctx->mleqc_state != MLXCX_EQ_ST_ARMED &&
-		    (mleq->mleq_state & MLXCX_EQ_ARMED)) {
-			if (mleq->mleq_cc == mleq->mleq_check_disarm_cc &&
-			    ++mleq->mleq_check_disarm_cnt >= 3) {
-				mlxcx_fm_ereport(mlxp, DDI_FM_DEVICE_STALL);
-				mlxcx_warn(mlxp, "EQ %u isn't armed",
-				    mleq->mleq_intr_index);
-			}
-			mleq->mleq_check_disarm_cc = mleq->mleq_cc;
-		} else {
-			mleq->mleq_check_disarm_cc = 0;
-			mleq->mleq_check_disarm_cnt = 0;
-		}
+		bcopy(&out.mlxo_query_eq_context, ctxp,
+		    sizeof (mlxcx_eventq_ctx_t));
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
@@ -2106,14 +2087,13 @@ mlxcx_cmd_create_cq(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq)
 }
 
 boolean_t
-mlxcx_cmd_query_rq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
+mlxcx_cmd_query_rq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq,
+    mlxcx_rq_ctx_t *ctxp)
 {
 	mlxcx_cmd_t cmd;
 	mlxcx_cmd_query_rq_in_t in;
 	mlxcx_cmd_query_rq_out_t out;
-	mlxcx_rq_ctx_t *ctx;
 	boolean_t ret;
-	mlxcx_rq_state_t state;
 
 	bzero(&in, sizeof (in));
 	bzero(&out, sizeof (out));
@@ -2136,51 +2116,22 @@ mlxcx_cmd_query_rq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	mlxcx_cmd_wait(&cmd);
 
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
-	if (ret && !mlwq->mlwq_fm_repd_qstate) {
-		ctx = &out.mlxo_query_rq_context;
-		ASSERT3U(from_be24(ctx->mlrqc_cqn), ==,
-		    mlwq->mlwq_cq->mlcq_num);
-		state = get_bits32(ctx->mlrqc_flags, MLXCX_RQ_STATE);
-		switch (state) {
-		case MLXCX_RQ_STATE_RST:
-			if (mlwq->mlwq_state & MLXCX_WQ_STARTED) {
-				mlxcx_fm_qstate_ereport(mlxp, "receive",
-				    mlwq->mlwq_num, "RST", state);
-				mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			}
-			break;
-		case MLXCX_RQ_STATE_RDY:
-			if (!(mlwq->mlwq_state & MLXCX_WQ_STARTED)) {
-				mlxcx_fm_qstate_ereport(mlxp, "receive",
-				    mlwq->mlwq_num, "RDY", state);
-				mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			}
-			break;
-		case MLXCX_RQ_STATE_ERR:
-			mlxcx_fm_qstate_ereport(mlxp, "receive",
-			    mlwq->mlwq_num, "ERR", state);
-			mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			break;
-		default:
-			mlxcx_fm_qstate_ereport(mlxp, "receive",
-			    mlwq->mlwq_num, "???", state);
-			mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			break;
-		}
+	if (ret) {
+		bcopy(&out.mlxo_query_rq_context, ctxp,
+		    sizeof (mlxcx_rq_ctx_t));
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
 }
 
 boolean_t
-mlxcx_cmd_query_sq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
+mlxcx_cmd_query_sq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq,
+    mlxcx_sq_ctx_t *ctxp)
 {
 	mlxcx_cmd_t cmd;
 	mlxcx_cmd_query_sq_in_t in;
 	mlxcx_cmd_query_sq_out_t out;
-	mlxcx_sq_ctx_t *ctx;
 	boolean_t ret;
-	mlxcx_sq_state_t state;
 
 	bzero(&in, sizeof (in));
 	bzero(&out, sizeof (out));
@@ -2203,49 +2154,21 @@ mlxcx_cmd_query_sq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	mlxcx_cmd_wait(&cmd);
 
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
-	if (ret && !mlwq->mlwq_fm_repd_qstate) {
-		ctx = &out.mlxo_query_sq_context;
-		ASSERT3U(from_be24(ctx->mlsqc_cqn), ==,
-		    mlwq->mlwq_cq->mlcq_num);
-		state = get_bits32(ctx->mlsqc_flags, MLXCX_SQ_STATE);
-		switch (state) {
-		case MLXCX_SQ_STATE_RST:
-			if (mlwq->mlwq_state & MLXCX_WQ_STARTED) {
-				mlxcx_fm_qstate_ereport(mlxp, "send",
-				    mlwq->mlwq_num, "RST", state);
-				mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			}
-			break;
-		case MLXCX_SQ_STATE_RDY:
-			if (!(mlwq->mlwq_state & MLXCX_WQ_STARTED)) {
-				mlxcx_fm_qstate_ereport(mlxp, "send",
-				    mlwq->mlwq_num, "RDY", state);
-				mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			}
-			break;
-		case MLXCX_SQ_STATE_ERR:
-			mlxcx_fm_qstate_ereport(mlxp, "send",
-			    mlwq->mlwq_num, "ERR", state);
-			mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			break;
-		default:
-			mlxcx_fm_qstate_ereport(mlxp, "send",
-			    mlwq->mlwq_num, "???", state);
-			mlwq->mlwq_fm_repd_qstate = B_TRUE;
-			break;
-		}
+	if (ret) {
+		bcopy(&out.mlxo_query_sq_context, ctxp,
+		    sizeof (mlxcx_sq_ctx_t));
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
 }
 
 boolean_t
-mlxcx_cmd_query_cq(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq)
+mlxcx_cmd_query_cq(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
+    mlxcx_completionq_ctx_t *ctxp)
 {
 	mlxcx_cmd_t cmd;
 	mlxcx_cmd_query_cq_in_t in;
 	mlxcx_cmd_query_cq_out_t out;
-	mlxcx_completionq_ctx_t *ctx;
 	boolean_t ret;
 
 	bzero(&in, sizeof (in));
@@ -2268,70 +2191,9 @@ mlxcx_cmd_query_cq(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq)
 	mlxcx_cmd_wait(&cmd);
 
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
-	if (ret && !mlcq->mlcq_fm_repd_qstate) {
-		const char *str;
-		const char *type = "";
-		uint_t v;
-
-		if (mlcq->mlcq_wq != NULL) {
-			mlxcx_work_queue_t *wq = mlcq->mlcq_wq;
-			if (wq->mlwq_type == MLXCX_WQ_TYPE_RECVQ)
-				type = "rx ";
-			else if (wq->mlwq_type == MLXCX_WQ_TYPE_SENDQ)
-				type = "tx ";
-		}
-
-		ctx = &out.mlxo_query_cq_context;
-		str = "???";
-		v = get_bits32(ctx->mlcqc_flags, MLXCX_CQ_CTX_STATUS);
-		switch (v) {
-		case MLXCX_CQC_STATUS_OK:
-			break;
-		case MLXCX_CQC_STATUS_OVERFLOW:
-			str = "OVERFLOW";
-			break;
-		case MLXCX_CQC_STATUS_WRITE_FAIL:
-			str = "WRITE_FAIL";
-			break;
-		case MLXCX_CQC_STATUS_INVALID:
-			str = "INVALID";
-			break;
-		}
-		if (v != MLXCX_CQC_STATUS_OK) {
-			mlxcx_fm_qstate_ereport(mlxp, "completion",
-			    mlcq->mlcq_num, str, v);
-			mlxcx_warn(mlxp, "%sCQ 0x%x is in bad status: %x (%s)",
-			    type, mlcq->mlcq_num, v, str);
-			mlcq->mlcq_fm_repd_qstate = B_TRUE;
-		}
-
-		v = get_bits32(ctx->mlcqc_flags, MLXCX_CQ_CTX_STATE);
-		if (v != MLXCX_CQC_STATE_ARMED &&
-		    (mlcq->mlcq_state & MLXCX_CQ_ARMED) &&
-		    !(mlcq->mlcq_state & MLXCX_CQ_POLLING)) {
-			if (mlcq->mlcq_cc == mlcq->mlcq_check_disarm_cc &&
-			    ++mlcq->mlcq_check_disarm_cnt >= 3) {
-				mlxcx_fm_ereport(mlxp, DDI_FM_DEVICE_STALL);
-				mlxcx_warn(mlxp, "%sCQ 0x%x (%p) isn't armed",
-				    type, mlcq->mlcq_num, mlcq);
-				mlxcx_warn(mlxp, "%sCQ 0x%x (%p): "
-				    "mlcq_cc = %x, mlcq_cc_armed = %x, "
-				    "mlcq_ec = %x, mlcq_ec_armed = %x, "
-				    "hw_cc = %x, hw_pc = %x, "
-				    "hw_last_notif = %x",
-				    type, mlcq->mlcq_num, mlcq,
-				    (mlcq->mlcq_cc & 0xffffff),
-				    (mlcq->mlcq_cc_armed & 0xffffff),
-				    mlcq->mlcq_ec, mlcq->mlcq_ec_armed,
-				    from_be24(ctx->mlcqc_consumer_counter),
-				    from_be24(ctx->mlcqc_producer_counter),
-				    from_be24(ctx->mlcqc_last_notified_index));
-			}
-			mlcq->mlcq_check_disarm_cc = mlcq->mlcq_cc;
-		} else {
-			mlcq->mlcq_check_disarm_cnt = 0;
-			mlcq->mlcq_check_disarm_cc = 0;
-		}
+	if (ret ) {
+		bcopy(&out.mlxo_query_cq_context, ctxp,
+		    sizeof (mlxcx_completionq_ctx_t));
 	}
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
@@ -2633,6 +2495,8 @@ mlxcx_cmd_create_tir(mlxcx_t *mlxp, mlxcx_tir_t *mltir)
 		VERIFY(mltir->mltir_rq->mlwq_state & MLXCX_WQ_CREATED);
 		ctx->mltirc_inline_rqn = to_be24(mltir->mltir_rq->mlwq_num);
 		break;
+	default:
+		VERIFY(0);
 	}
 
 	if (!mlxcx_cmd_send(mlxp, &cmd, &in, sizeof (in), &out, sizeof (out))) {
@@ -3112,18 +2976,18 @@ mlxcx_cmd_set_flow_table_entry(mlxcx_t *mlxp, mlxcx_flow_entry_t *mlfe)
 				    mlfe->mlfe_dest[i].mlfed_flow->mlft_num);
 			} else {
 				/* Invalid flow entry destination */
-				ASSERT(0);
+				VERIFY(0);
 			}
 		}
 		break;
 	case MLXCX_FLOW_ACTION_COUNT:
-		/* XXX: counters? */
-		ASSERT(0);
+		/* We don't support count actions yet. */
+		VERIFY(0);
 		break;
 	case MLXCX_FLOW_ACTION_ENCAP:
 	case MLXCX_FLOW_ACTION_DECAP:
-		/* XXX: encap? */
-		ASSERT(0);
+		/* We don't support encap/decap actions yet. */
+		VERIFY(0);
 		break;
 	}
 
@@ -3232,6 +3096,15 @@ mlxcx_cmd_delete_flow_table_entry(mlxcx_t *mlxp, mlxcx_flow_entry_t *mlfe)
 
 	ret = mlxcx_cmd_evaluate(mlxp, &cmd);
 	if (ret) {
+		/*
+		 * Note that flow entries have a different lifecycle to most
+		 * other things we create -- we have to be able to re-use them
+		 * after they have been deleted, since they exist at a fixed
+		 * position in their flow table.
+		 *
+		 * So we clear the CREATED bit here for them to let us call
+		 * create_flow_table_entry() on the same entry again later.
+		 */
 		mlfe->mlfe_state &= ~MLXCX_FLOW_ENTRY_CREATED;
 		mlfe->mlfe_state |= MLXCX_FLOW_ENTRY_DELETED;
 	}
@@ -3570,3 +3443,102 @@ mlxcx_cmd_set_int_mod(mlxcx_t *mlxp, uint_t intr, uint_t min_delay)
 	mlxcx_cmd_fini(mlxp, &cmd);
 	return (ret);
 }
+
+/*
+ * CTASSERTs here are for the structs in mlxcx_reg.h, to check they match
+ * against offsets from the PRM.
+ *
+ * They're not in the header file, to avoid them being used by multiple .c
+ * files.
+ */
+
+CTASSERT(offsetof(mlxcx_eventq_ent_t, mleqe_unknown_data) == 0x20);
+CTASSERT(offsetof(mlxcx_eventq_ent_t, mleqe_signature) == 0x3c + 2);
+CTASSERT(sizeof (mlxcx_eventq_ent_t) == 64);
+
+CTASSERT(offsetof(mlxcx_completionq_error_ent_t, mlcqee_byte_cnt) == 0x2C);
+CTASSERT(offsetof(mlxcx_completionq_error_ent_t, mlcqee_wqe_opcode) == 0x38);
+
+CTASSERT(sizeof (mlxcx_completionq_error_ent_t) ==
+    sizeof (mlxcx_completionq_ent_t));
+CTASSERT(sizeof (mlxcx_wqe_control_seg_t) == (1 << 4));
+
+CTASSERT(offsetof(mlxcx_wqe_eth_seg_t, mles_inline_headers) == 0x0e);
+CTASSERT(sizeof (mlxcx_wqe_eth_seg_t) == (1 << 5));
+
+CTASSERT(sizeof (mlxcx_wqe_data_seg_t) == (1 << 4));
+
+CTASSERT(sizeof (mlxcx_sendq_ent_t) == (1 << MLXCX_SENDQ_STRIDE_SHIFT));
+
+CTASSERT(sizeof (mlxcx_sendq_bf_t) == (1 << MLXCX_SENDQ_STRIDE_SHIFT));
+
+CTASSERT(sizeof (mlxcx_sendq_extra_ent_t) == (1 << MLXCX_SENDQ_STRIDE_SHIFT));
+
+CTASSERT(sizeof (mlxcx_recvq_ent_t) == (1 << MLXCX_RECVQ_STRIDE_SHIFT));
+
+CTASSERT(offsetof(mlxcx_workq_ctx_t, mlwqc_dbr_addr) == 0x10);
+CTASSERT(offsetof(mlxcx_workq_ctx_t, mlwqc_pas) == 0xc0);
+
+CTASSERT(offsetof(mlxcx_rq_ctx_t, mlrqc_cqn) == 0x09);
+CTASSERT(offsetof(mlxcx_rq_ctx_t, mlrqc_wq) == 0x30);
+
+CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_cqn) == 0x09);
+CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_tis_lst_sz) == 0x20);
+CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_tis_num) == 0x2d);
+CTASSERT(offsetof(mlxcx_sq_ctx_t, mlsqc_wq) == 0x30);
+
+CTASSERT(sizeof (mlxcx_tis_ctx_t) == 0xa0);
+CTASSERT(offsetof(mlxcx_tis_ctx_t, mltisc_transport_domain) == 0x25);
+
+CTASSERT(offsetof(mlxcx_rqtable_ctx_t, mlrqtc_max_size) == 0x16);
+CTASSERT(offsetof(mlxcx_rqtable_ctx_t, mlrqtc_rqref) == 0xF0);
+
+CTASSERT(offsetof(mlxcx_cmd_create_eq_in_t, mlxi_create_eq_event_bitmask) ==
+    0x58);
+CTASSERT(offsetof(mlxcx_cmd_create_eq_in_t, mlxi_create_eq_pas) == 0x110);
+CTASSERT(offsetof(mlxcx_cmd_create_eq_in_t, mlxi_create_eq_context) == 0x10);
+
+CTASSERT(offsetof(mlxcx_cmd_create_tir_in_t, mlxi_create_tir_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_cmd_create_tis_in_t, mlxi_create_tis_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_cmd_query_special_ctxs_out_t,
+    mlxo_query_special_ctxs_resd_lkey) == 0x0c);
+
+CTASSERT(offsetof(mlxcx_cmd_query_cq_out_t, mlxo_query_cq_context) == 0x10);
+CTASSERT(offsetof(mlxcx_cmd_query_cq_out_t, mlxo_query_cq_pas) == 0x110);
+
+CTASSERT(offsetof(mlxcx_cmd_query_rq_out_t, mlxo_query_rq_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_cmd_create_sq_in_t, mlxi_create_sq_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_cmd_modify_sq_in_t, mlxi_modify_sq_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_cmd_query_sq_out_t, mlxo_query_sq_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_cmd_create_rqt_in_t, mlxi_create_rqt_context) == 0x20);
+
+CTASSERT(offsetof(mlxcx_reg_pmtu_t, mlrd_pmtu_oper_mtu) == 0x0C);
+
+CTASSERT(sizeof (mlxcx_reg_ptys_t) == 64);
+CTASSERT(offsetof(mlxcx_reg_ptys_t, mlrd_ptys_proto_cap) == 0x0c);
+CTASSERT(offsetof(mlxcx_reg_ptys_t, mlrd_ptys_proto_admin) == 0x18);
+CTASSERT(offsetof(mlxcx_reg_ptys_t, mlrd_ptys_proto_partner_advert) == 0x30);
+
+CTASSERT(offsetof(mlxcx_reg_mcia_t, mlrd_mcia_data) == 0x10);
+
+CTASSERT(offsetof(mlxcx_ppcnt_ieee_802_3_t,
+    mlppc_ieee_802_3_in_range_len_err) == 0x50);
+CTASSERT(offsetof(mlxcx_ppcnt_ieee_802_3_t,
+    mlppc_ieee_802_3_pause_tx) == 0x90);
+
+CTASSERT(sizeof (mlxcx_reg_ppcnt_t) == 256);
+CTASSERT(offsetof(mlxcx_reg_ppcnt_t, mlrd_ppcnt_data) == 0x08);
+
+CTASSERT(offsetof(mlxcx_cmd_access_register_in_t,
+    mlxi_access_register_argument) == 0x0C);
+CTASSERT(offsetof(mlxcx_cmd_access_register_in_t,
+    mlxi_access_register_data) == 0x10);
+
+CTASSERT(offsetof(mlxcx_cmd_access_register_out_t,
+    mlxo_access_register_data) == 0x10);

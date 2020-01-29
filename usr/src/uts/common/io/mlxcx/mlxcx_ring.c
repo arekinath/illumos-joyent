@@ -47,12 +47,12 @@ mlxcx_wq_alloc_dma(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	/* Receive and send queue entries might be different sizes. */
 	switch (mlwq->mlwq_type) {
 	case MLXCX_WQ_TYPE_SENDQ:
-		mlwq->mlwq_entshift = mlxcx_sq_size_shift;
+		mlwq->mlwq_entshift = mlxp->mlx_props.mldp_sq_size_shift;
 		mlwq->mlwq_nents = (1 << mlwq->mlwq_entshift);
 		sz = mlwq->mlwq_nents * sizeof (mlxcx_sendq_ent_t);
 		break;
 	case MLXCX_WQ_TYPE_RECVQ:
-		mlwq->mlwq_entshift = mlxcx_rq_size_shift;
+		mlwq->mlwq_entshift = mlxp->mlx_props.mldp_rq_size_shift;
 		mlwq->mlwq_nents = (1 << mlwq->mlwq_entshift);
 		sz = mlwq->mlwq_nents * sizeof (mlxcx_recvq_ent_t);
 		break;
@@ -123,7 +123,7 @@ mlxcx_cq_alloc_dma(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq)
 
 	VERIFY0(mlcq->mlcq_state & MLXCX_EQ_ALLOC);
 
-	mlcq->mlcq_entshift = mlxcx_cq_size_shift;
+	mlcq->mlcq_entshift = mlxp->mlx_props.mldp_cq_size_shift;
 	mlcq->mlcq_nents = (1 << mlcq->mlcq_entshift);
 	sz = mlcq->mlcq_nents * sizeof (mlxcx_completionq_ent_t);
 	ASSERT3U(sz & (MLXCX_HW_PAGE_SIZE - 1), ==, 0);
@@ -361,8 +361,8 @@ mlxcx_cq_setup(mlxcx_t *mlxp, mlxcx_event_queue_t *eq,
 	cq->mlcq_uar = &mlxp->mlx_uar;
 	cq->mlcq_eq = eq;
 
-	cq->mlcq_cqemod_period_usec = mlxcx_cqemod_period_usec;
-	cq->mlcq_cqemod_count = mlxcx_cqemod_count;
+	cq->mlcq_cqemod_period_usec = mlxp->mlx_props.mldp_cqemod_period_usec;
+	cq->mlcq_cqemod_count = mlxp->mlx_props.mldp_cqemod_count;
 
 	if (!mlxcx_cmd_create_cq(mlxp, cq)) {
 		mutex_exit(&cq->mlcq_mtx);
@@ -699,10 +699,10 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 	g->mlg_port = &mlxp->mlx_ports[0];
 	g->mlg_state |= MLXCX_GROUP_INIT;
 
-	g->mlg_nwqs = mlxcx_rx_nrings_per_small_group;
+	g->mlg_nwqs = mlxp->mlx_props.mldp_rx_nrings_per_small_group;
 	i = g - &mlxp->mlx_rx_groups[0];
-	if (i < mlxcx_rx_ngroups_large)
-		g->mlg_nwqs = mlxcx_rx_nrings_per_large_group;
+	if (i < mlxp->mlx_props.mldp_rx_ngroups_large)
+		g->mlg_nwqs = mlxp->mlx_props.mldp_rx_nrings_per_large_group;
 
 	g->mlg_wqs_size = g->mlg_nwqs * sizeof (mlxcx_work_queue_t);
 	g->mlg_wqs = kmem_zalloc(g->mlg_wqs_size, KM_SLEEP);
@@ -718,9 +718,17 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 	g->mlg_state |= MLXCX_GROUP_RQT;
 
 	for (i = 0; i < g->mlg_nwqs; ++i) {
-		eq = &mlxp->mlx_eqs[mlxp->mlx_next_eq++];
-		if (mlxp->mlx_next_eq >= mlxp->mlx_intr_count)
-			mlxp->mlx_next_eq = 1;
+		eq = NULL;
+		while (eq == NULL) {
+			eq = &mlxp->mlx_eqs[mlxp->mlx_next_eq++];
+			if (mlxp->mlx_next_eq >= mlxp->mlx_intr_count)
+				mlxp->mlx_next_eq = 1;
+			if (eq->mleq_type != MLXCX_EQ_TYPE_ANY &&
+			    eq->mleq_type != MLXCX_EQ_TYPE_RX) {
+				/* Try the next one */
+				eq = NULL;
+			}
+		}
 
 		if (!mlxcx_cq_setup(mlxp, eq, &cq)) {
 			g->mlg_nwqs = i;
@@ -1018,7 +1026,7 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 	ft->mlft_type = MLXCX_FLOW_TABLE_NIC_RX;
 	ft->mlft_level = 1;
 	ft->mlft_port = g->mlg_port;
-	ft->mlft_entshift = mlxcx_ftbl_vlan_size_shift;
+	ft->mlft_entshift = mlxp->mlx_props.mldp_ftbl_vlan_size_shift;
 	ft->mlft_nents = (1 << ft->mlft_entshift);
 	ft->mlft_entsize = ft->mlft_nents * sizeof (mlxcx_flow_entry_t);
 	ft->mlft_ent = kmem_zalloc(ft->mlft_entsize, KM_SLEEP);
@@ -1238,7 +1246,7 @@ mlxcx_tx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 	g->mlg_type = MLXCX_GROUP_TX;
 	g->mlg_port = &mlxp->mlx_ports[0];
 
-	g->mlg_nwqs = mlxcx_tx_nrings_per_group;
+	g->mlg_nwqs = mlxp->mlx_props.mldp_tx_nrings_per_group;
 	g->mlg_wqs_size = g->mlg_nwqs * sizeof (mlxcx_work_queue_t);
 	g->mlg_wqs = kmem_zalloc(g->mlg_wqs_size, KM_SLEEP);
 	g->mlg_state |= MLXCX_GROUP_WQS;
@@ -1253,9 +1261,17 @@ mlxcx_tx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 	g->mlg_state |= MLXCX_GROUP_TIRTIS;
 
 	for (i = 0; i < g->mlg_nwqs; ++i) {
-		eq = &mlxp->mlx_eqs[mlxp->mlx_next_eq++];
-		if (mlxp->mlx_next_eq >= mlxp->mlx_intr_count)
-			mlxp->mlx_next_eq = 1;
+		eq = NULL;
+		while (eq == NULL) {
+			eq = &mlxp->mlx_eqs[mlxp->mlx_next_eq++];
+			if (mlxp->mlx_next_eq >= mlxp->mlx_intr_count)
+				mlxp->mlx_next_eq = 1;
+			if (eq->mleq_type != MLXCX_EQ_TYPE_ANY &&
+			    eq->mleq_type != MLXCX_EQ_TYPE_TX) {
+				/* Try the next one */
+				eq = NULL;
+			}
+		}
 
 		if (!mlxcx_cq_setup(mlxp, eq, &cq))
 			return (B_FALSE);
@@ -1407,9 +1423,9 @@ mlxcx_sq_add_nop(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 
 	ent0->mlsqe_control.mlcs_ds = 1;
 
-	(void) ddi_dma_sync(mlwq->mlwq_dma.mxdb_dma_handle,
-	    (char *)ent0 - (char *)mlwq->mlwq_send_ent,
-	    sizeof (mlxcx_sendq_ent_t), DDI_DMA_SYNC_FORDEV);
+	VERIFY0(ddi_dma_sync(mlwq->mlwq_dma.mxdb_dma_handle,
+	    (uintptr_t)ent0 - (uintptr_t)mlwq->mlwq_send_ent,
+	    sizeof (mlxcx_sendq_ent_t), DDI_DMA_SYNC_FORDEV));
 	ddi_fm_dma_err_get(mlwq->mlwq_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
@@ -1543,9 +1559,9 @@ mlxcx_sq_add_buffer(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq,
 	 * Make sure the workqueue entry is flushed out before updating
 	 * the doorbell.
 	 */
-	(void) ddi_dma_sync(mlwq->mlwq_dma.mxdb_dma_handle,
-	    (char *)ent0 - (char *)mlwq->mlwq_send_ent,
-	    ents * sizeof (mlxcx_sendq_ent_t), DDI_DMA_SYNC_FORDEV);
+	VERIFY0(ddi_dma_sync(mlwq->mlwq_dma.mxdb_dma_handle,
+	    (uintptr_t)ent0 - (uintptr_t)mlwq->mlwq_send_ent,
+	    ents * sizeof (mlxcx_sendq_ent_t), DDI_DMA_SYNC_FORDEV));
 	ddi_fm_dma_err_get(mlwq->mlwq_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
@@ -1621,9 +1637,9 @@ mlxcx_rq_add_buffers(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq,
 		 * Make sure the workqueue entry is flushed out before updating
 		 * the doorbell.
 		 */
-		(void) ddi_dma_sync(mlwq->mlwq_dma.mxdb_dma_handle,
-		    (char *)ent - (char *)mlwq->mlwq_recv_ent,
-		    sizeof (mlxcx_recvq_ent_t), DDI_DMA_SYNC_FORDEV);
+		VERIFY0(ddi_dma_sync(mlwq->mlwq_dma.mxdb_dma_handle,
+		    (uintptr_t)ent - (uintptr_t)mlwq->mlwq_recv_ent,
+		    sizeof (mlxcx_recvq_ent_t), DDI_DMA_SYNC_FORDEV));
 		ddi_fm_dma_err_get(mlwq->mlwq_dma.mxdb_dma_handle, &err,
 		    DDI_FME_VERSION);
 		if (err.fme_status != DDI_FM_OK) {
@@ -1780,7 +1796,7 @@ mlxcx_tx_completion(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 		mlxcx_fm_cqe_ereport(mlxp, mlcq, eent);
 		mlxcx_buf_return_chain(mlxp, buf, B_FALSE);
 		mutex_enter(&mlcq->mlcq_wq->mlwq_mtx);
-		(void) mlxcx_cmd_query_sq(mlxp, mlcq->mlcq_wq);
+		mlxcx_check_sq(mlxp, mlcq->mlcq_wq);
 		mutex_exit(&mlcq->mlcq_wq->mlwq_mtx);
 		return;
 	}
@@ -1822,7 +1838,7 @@ mlxcx_rx_completion(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 		mlxcx_fm_cqe_ereport(mlxp, mlcq, eent);
 		mlxcx_buf_return(mlxp, buf);
 		mutex_enter(&mlcq->mlcq_wq->mlwq_mtx);
-		(void) mlxcx_cmd_query_rq(mlxp, mlcq->mlcq_wq);
+		mlxcx_check_rq(mlxp, mlcq->mlcq_wq);
 		mutex_exit(&mlcq->mlcq_wq->mlwq_mtx);
 		return (NULL);
 	}
@@ -1898,6 +1914,7 @@ mlxcx_buf_mp_return(caddr_t arg)
 {
 	mlxcx_buffer_t *b = (mlxcx_buffer_t *)arg;
 	mlxcx_t *mlxp = b->mlb_mlx;
+
 	if (b->mlb_state != MLXCX_BUFFER_ON_LOAN) {
 		b->mlb_mp = NULL;
 		return;
@@ -1995,6 +2012,7 @@ mlxcx_buf_bind_or_copy(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
 	uint8_t *rptr;
 	size_t sz;
 	size_t ncookies = 0;
+	boolean_t ret;
 
 	for (mp = mpb; mp != NULL; mp = mp->b_cont) {
 		rptr = mp->b_rptr;
@@ -2005,30 +2023,31 @@ mlxcx_buf_bind_or_copy(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
 		rptr += off;
 		sz -= off;
 
-		if (sz < mlxcx_tx_bind_threshold)
+		if (sz < mlxp->mlx_props.mldp_tx_bind_threshold)
 			goto copyb;
 
 		mlxcx_buf_take_foreign(mlxp, wq, &b);
-		if (mlxcx_dma_bind_mblk(mlxp, &b->mlb_dma, mp, off, B_FALSE))
-			goto gotb;
-		mlxcx_buf_return(mlxp, b);
+		ret = mlxcx_dma_bind_mblk(mlxp, &b->mlb_dma, mp, off, B_FALSE);
+
+		if (!ret) {
+			mlxcx_buf_return(mlxp, b);
 
 copyb:
-		mlxcx_buf_take(mlxp, wq, &b);
-		ASSERT3U(b->mlb_dma.mxdb_len, >=, sz);
-		bcopy(rptr, b->mlb_dma.mxdb_va, sz);
-		(void) ddi_dma_sync(b->mlb_dma.mxdb_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORDEV);
-		ddi_fm_dma_err_get(b->mlb_dma.mxdb_dma_handle, &err,
-		    DDI_FME_VERSION);
-		if (err.fme_status != DDI_FM_OK) {
-			ddi_fm_dma_err_clear(b->mlb_dma.mxdb_dma_handle,
+			mlxcx_buf_take(mlxp, wq, &b);
+			ASSERT3U(b->mlb_dma.mxdb_len, >=, sz);
+			bcopy(rptr, b->mlb_dma.mxdb_va, sz);
+			(void) ddi_dma_sync(b->mlb_dma.mxdb_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORDEV);
+			ddi_fm_dma_err_get(b->mlb_dma.mxdb_dma_handle, &err,
 			    DDI_FME_VERSION);
-			mlxcx_buf_return(mlxp, b);
-			goto copyb;
+			if (err.fme_status != DDI_FM_OK) {
+				ddi_fm_dma_err_clear(b->mlb_dma.mxdb_dma_handle,
+				    DDI_FME_VERSION);
+				mlxcx_buf_return(mlxp, b);
+				goto copyb;
+			}
 		}
 
-gotb:
 		/*
 		 * We might overestimate here when we've copied data, since
 		 * the buffer might be longer than what we copied into it.

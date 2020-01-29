@@ -19,6 +19,23 @@
 #include <sys/types.h>
 #include <sys/byteorder.h>
 
+/*
+ * The inlines and structs in this file are used by mlxcx to ensure endian
+ * safety when dealing with memory-mapped structures from the device, and
+ * also simpler use of 24-bit integers (which Mellanox loves).
+ *
+ * By declaring all of these values in the memory-mapped structures as structs
+ * (e.g. uint32be_t) rather than bare integers (uint32_t) we ensure that the
+ * compiler will not allow them to be silently converted to integers and used
+ * without doing the necessary byte-swapping work.
+ *
+ * The uintXbe_t structs are designed to be used inside a #pragma pack(1)
+ * context only and we don't try to fix up their alignment.
+ *
+ * Also present in here are a number of bitsX_t types which can be used to
+ * gain a little bit of type safety when dealing with endian-swapped bitfields.
+ */
+
 #pragma pack(1)
 typedef struct { uint16_t be_val; } uint16be_t;
 typedef struct { uint8_t be_val[3]; } uint24be_t;

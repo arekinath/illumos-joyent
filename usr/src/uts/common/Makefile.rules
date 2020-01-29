@@ -2340,9 +2340,6 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/mega_sas/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/mii/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/mlxcx/%.c
-	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/mr_sas/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
