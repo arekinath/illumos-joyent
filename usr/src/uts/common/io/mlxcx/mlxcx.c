@@ -733,7 +733,6 @@ mlxcx_teardown_pages(mlxcx_t *mlxp)
 {
 	uint_t nzeros = 0;
 	uint64_t *pas;
-	const ddi_dma_cookie_t *ck;
 
 	pas = kmem_alloc(sizeof (*pas) * MLXCX_MANAGE_PAGES_MAX_PAGES,
 	    KM_SLEEP);
