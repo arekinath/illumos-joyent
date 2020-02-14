@@ -83,6 +83,7 @@ mlxcx_eq_next(mlxcx_event_queue_t *mleq)
 	ddi_fm_dma_err_get(mleq->mleq_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status == DDI_FM_OK && (ent->mleqe_owner & 1) == swowner) {
+		/* The PRM says we have to membar here, so we're doing it */
 		membar_consumer();
 		++mleq->mleq_cc;
 		return (ent);
@@ -178,6 +179,7 @@ mlxcx_cq_next(mlxcx_completion_queue_t *mlcq)
 	ddi_fm_dma_err_get(mlcq->mlcq_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status == DDI_FM_OK && (ent->mlcqe_owner & 1) == swowner) {
+		/* The PRM says we have to membar here, so we're doing it */
 		membar_consumer();
 		++mlcq->mlcq_cc;
 		return (ent);
@@ -219,8 +221,7 @@ mlxcx_arm_cq(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq)
 	mlcq->mlcq_doorbell->mlcqd_arm_ci = dbval;
 
 retry:
-	(void) ddi_dma_sync(mlcq->mlcq_doorbell_dma.mxdb_dma_handle,
-	    0, 0, DDI_DMA_SYNC_FORDEV);
+	MLXCX_DMA_SYNC(mlcq->mlcq_doorbell_dma, DDI_DMA_SYNC_FORDEV);
 	ddi_fm_dma_err_get(mlcq->mlcq_doorbell_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
@@ -314,19 +315,15 @@ mlxcx_event_name(mlxcx_event_t evt)
 	return ("UNKNOWN");
 }
 
+/* Should be called only when link state has changed. */
 void
 mlxcx_update_link_state(mlxcx_t *mlxp, mlxcx_port_t *port)
 {
 	link_state_t ls;
-	char speedbuf[64];
 
 	mutex_enter(&port->mlp_mtx);
 	(void) mlxcx_cmd_query_port_status(mlxp, port);
 	(void) mlxcx_cmd_query_port_speed(mlxp, port);
-
-	speedbuf[0] = 0;
-	mlxcx_eth_proto_to_string(port->mlp_oper_proto, speedbuf,
-	    sizeof (speedbuf));
 
 	switch (port->mlp_oper_status) {
 	case MLXCX_PORT_STATUS_UP:
@@ -983,8 +980,8 @@ mlxcx_intr_setup(mlxcx_t *mlxp)
 	}
 
 	for (i = 1; i < mlxp->mlx_intr_count; ++i) {
-		mutex_init(&mlxp->mlx_eqs[i].mleq_mtx, "mlx_eq_mtx",
-		    MUTEX_DRIVER, DDI_INTR_PRI(mlxp->mlx_intr_pri));
+		mutex_init(&mlxp->mlx_eqs[i].mleq_mtx, NULL, MUTEX_DRIVER,
+		    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 		avl_create(&mlxp->mlx_eqs[i].mleq_cqs, mlxcx_cq_compare,
 		    sizeof (mlxcx_completion_queue_t),
 		    offsetof(mlxcx_completion_queue_t, mlcq_eq_entry));

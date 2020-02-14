@@ -41,11 +41,9 @@ Promiscuous access via
 .Xr snoop 1M and
 .Xr dlpi 7P
 .It
-LED control via
-.Xr dlpi 7P
+LED control
 .It
-Transceiver information via
-.Xr dlpi 7P
+Transceiver information
 .El
 .Pp
 At this time, the driver does not support Large Send Offload (LSO), energy

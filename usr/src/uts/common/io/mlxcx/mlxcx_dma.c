@@ -155,7 +155,7 @@ mlxcx_dma_buf_attr(mlxcx_t *mlxp, ddi_dma_attr_t *attrp)
 	 * The PRM gives us no alignment requirements for scatter pointers,
 	 * but it implies that units < 16bytes are a bad idea.
 	 */
-	attrp->dma_attr_align = 1;
+	attrp->dma_attr_align = 16;
 	attrp->dma_attr_granular = 1;
 
 	attrp->dma_attr_burstsizes = 0xfff;
@@ -194,6 +194,12 @@ mlxcx_dma_qdbell_attr(mlxcx_t *mlxp, ddi_dma_attr_t *attrp)
 	attrp->dma_attr_addr_lo = 0x0;
 	attrp->dma_attr_addr_hi = UINT64_MAX;
 
+	/*
+	 * Queue doorbells are always exactly 16 bytes in length, but
+	 * the ddi_dma functions don't like such small values of count_max.
+	 *
+	 * We tell some lies here.
+	 */
 	attrp->dma_attr_count_max = MLXCX_QUEUE_DMA_PAGE_SIZE - 1;
 	attrp->dma_attr_align = 8;
 	attrp->dma_attr_burstsizes = 0x8;

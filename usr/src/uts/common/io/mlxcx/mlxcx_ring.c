@@ -336,9 +336,9 @@ mlxcx_cq_setup(mlxcx_t *mlxp, mlxcx_event_queue_t *eq,
 	mlxcx_completion_queue_t *cq;
 
 	cq = kmem_zalloc(sizeof (mlxcx_completion_queue_t), KM_SLEEP);
-	mutex_init(&cq->mlcq_mtx, "mlx_cq_mtx", MUTEX_DRIVER,
+	mutex_init(&cq->mlcq_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
-	mutex_init(&cq->mlcq_bufbmtx, "mlx_cq_bufsb_mtx", MUTEX_DRIVER,
+	mutex_init(&cq->mlcq_bufbmtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	list_create(&cq->mlcq_buffers, sizeof (mlxcx_buffer_t),
 	    offsetof(mlxcx_buffer_t, mlb_cq_entry));
@@ -388,7 +388,7 @@ static boolean_t
 mlxcx_rq_setup(mlxcx_t *mlxp, mlxcx_completion_queue_t *cq,
     mlxcx_work_queue_t *wq)
 {
-	mutex_init(&wq->mlwq_mtx, "mlx_wq_mtx", MUTEX_DRIVER,
+	mutex_init(&wq->mlwq_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 
 	list_insert_tail(&mlxp->mlx_wqs, wq);
@@ -429,7 +429,7 @@ static boolean_t
 mlxcx_sq_setup(mlxcx_t *mlxp, mlxcx_port_t *port, mlxcx_completion_queue_t *cq,
     mlxcx_tis_t *tis, mlxcx_work_queue_t *wq)
 {
-	mutex_init(&wq->mlwq_mtx, "mlx_wq_mtx", MUTEX_DRIVER,
+	mutex_init(&wq->mlwq_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 
 	list_insert_tail(&mlxp->mlx_wqs, wq);
@@ -691,7 +691,7 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 
 	ASSERT3S(g->mlg_state, ==, 0);
 
-	mutex_init(&g->mlg_mtx, "mlx_rx_group_mtx", MUTEX_DRIVER,
+	mutex_init(&g->mlg_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	mutex_enter(&g->mlg_mtx);
 	g->mlg_mlx = mlxp;
@@ -827,7 +827,7 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 
 	g->mlg_rx_hash_ft = (ft = kmem_zalloc(sizeof (mlxcx_flow_table_t),
 	    KM_SLEEP));
-	mutex_init(&ft->mlft_mtx, "mlx_rx_hash_ft_mtx", MUTEX_DRIVER,
+	mutex_init(&ft->mlft_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	avl_create(&g->mlg_rx_macs, mlxcx_grmac_compare,
 	    sizeof (mlxcx_group_mac_t),
@@ -1016,7 +1016,7 @@ mlxcx_rx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 
 	g->mlg_rx_vlan_ft = (ft = kmem_zalloc(sizeof (mlxcx_flow_table_t),
 	    KM_SLEEP));
-	mutex_init(&ft->mlft_mtx, "mlx_rx_vlan_ft_mtx", MUTEX_DRIVER,
+	mutex_init(&ft->mlft_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	list_create(&g->mlg_rx_vlans, sizeof (mlxcx_group_vlan_t),
 	    offsetof(mlxcx_group_vlan_t, mlgv_entry));
@@ -1237,7 +1237,7 @@ mlxcx_tx_group_setup(mlxcx_t *mlxp, mlxcx_ring_group_t *g)
 
 	ASSERT3S(g->mlg_state, ==, 0);
 
-	mutex_init(&g->mlg_mtx, "mlx_tx_group_mtx", MUTEX_DRIVER,
+	mutex_init(&g->mlg_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	g->mlg_state |= MLXCX_GROUP_INIT;
 	mutex_enter(&g->mlg_mtx);
@@ -1366,8 +1366,7 @@ mlxcx_sq_ring_dbell(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq, uint_t first)
 	bf = &mlwq->mlwq_uar->mlu_bf[idx];
 
 retry:
-	(void) ddi_dma_sync(mlwq->mlwq_doorbell_dma.mxdb_dma_handle, 0, 0,
-	    DDI_DMA_SYNC_FORDEV);
+	MLXCX_DMA_SYNC(mlwq->mlwq_doorbell_dma, DDI_DMA_SYNC_FORDEV);
 	ddi_fm_dma_err_get(mlwq->mlwq_doorbell_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
@@ -1652,15 +1651,13 @@ mlxcx_rq_add_buffers(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq,
 	 * Flush the CQ doorbell as well so that HW knows how many
 	 * completions we've consumed.
 	 */
-	(void) ddi_dma_sync(cq->mlcq_doorbell_dma.mxdb_dma_handle,
-	    0, 0, DDI_DMA_SYNC_FORDEV);
+	MLXCX_DMA_SYNC(cq->mlcq_doorbell_dma, DDI_DMA_SYNC_FORDEV);
 	ddi_fm_dma_err_get(cq->mlcq_doorbell_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
 		return (B_FALSE);
 	}
-	(void) ddi_dma_sync(mlwq->mlwq_doorbell_dma.mxdb_dma_handle,
-	    0, 0, DDI_DMA_SYNC_FORDEV);
+	MLXCX_DMA_SYNC(mlwq->mlwq_doorbell_dma, DDI_DMA_SYNC_FORDEV);
 	ddi_fm_dma_err_get(mlwq->mlwq_doorbell_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
@@ -1700,7 +1697,7 @@ mlxcx_rq_refill(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	while (!(mlwq->mlwq_state & MLXCX_WQ_TEARDOWN) && done < want) {
 		n = mlxcx_buf_take_n(mlxp, mlwq, b, MLXCX_RQ_REFILL_STEP);
 		if (n == 0) {
-			mlxcx_warn(mlxp, "exiting rq refill early, done %u "
+			mlxcx_warn(mlxp, "!exiting rq refill early, done %u "
 			    "but wanted %u", done, want);
 			return;
 		}
@@ -1764,11 +1761,12 @@ mlxcx_fm_cqe_ereport(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 	char buf[FM_MAX_CLASS];
 	const char *name = mlxcx_cq_err_syndrome_string(ent->mlcqee_syndrome);
 
+	if (!DDI_FM_EREPORT_CAP(mlxp->mlx_fm_caps))
+		return;
+
 	(void) snprintf(buf, FM_MAX_CLASS, "%s.%s",
 	    MLXCX_FM_SERVICE_MLXCX, "cqe.err");
 	ena = fm_ena_generate(0, FM_ENA_FMT1);
-	if (!DDI_FM_EREPORT_CAP(mlxp->mlx_fm_caps))
-		return;
 
 	ddi_fm_ereport_post(mlxp->mlx_dip, buf, ena, DDI_NOSLEEP,
 	    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
@@ -1802,20 +1800,20 @@ mlxcx_tx_completion(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 	}
 
 	if (ent->mlcqe_opcode != MLXCX_CQE_OP_REQ) {
-		mlxcx_warn(mlxp, "got weird cq opcode: %x", ent->mlcqe_opcode);
+		mlxcx_warn(mlxp, "!got weird cq opcode: %x", ent->mlcqe_opcode);
 		mlxcx_buf_return_chain(mlxp, buf, B_FALSE);
 		return;
 	}
 
 	if (ent->mlcqe_send_wqe_opcode != MLXCX_WQE_OP_SEND) {
-		mlxcx_warn(mlxp, "got weird cq wqe opcode: %x",
+		mlxcx_warn(mlxp, "!got weird cq wqe opcode: %x",
 		    ent->mlcqe_send_wqe_opcode);
 		mlxcx_buf_return_chain(mlxp, buf, B_FALSE);
 		return;
 	}
 
 	if (ent->mlcqe_format != MLXCX_CQE_FORMAT_BASIC) {
-		mlxcx_warn(mlxp, "got weird cq format: %x", ent->mlcqe_format);
+		mlxcx_warn(mlxp, "!got weird cq format: %x", ent->mlcqe_format);
 		mlxcx_buf_return_chain(mlxp, buf, B_FALSE);
 		return;
 	}
@@ -1844,13 +1842,13 @@ mlxcx_rx_completion(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 	}
 
 	if (ent->mlcqe_opcode != MLXCX_CQE_OP_RESP) {
-		mlxcx_warn(mlxp, "got weird cq opcode: %x", ent->mlcqe_opcode);
+		mlxcx_warn(mlxp, "!got weird cq opcode: %x", ent->mlcqe_opcode);
 		mlxcx_buf_return(mlxp, buf);
 		return (NULL);
 	}
 
 	if (ent->mlcqe_format != MLXCX_CQE_FORMAT_BASIC) {
-		mlxcx_warn(mlxp, "got weird cq format: %x", ent->mlcqe_format);
+		mlxcx_warn(mlxp, "!got weird cq format: %x", ent->mlcqe_format);
 		mlxcx_buf_return(mlxp, buf);
 		return (NULL);
 	}
@@ -1860,8 +1858,7 @@ mlxcx_rx_completion(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 		    ent->mlcqe_rx_drop_counter);
 	}
 
-	(void) ddi_dma_sync(buf->mlb_dma.mxdb_dma_handle, 0, 0,
-	    DDI_DMA_SYNC_FORCPU);
+	MLXCX_DMA_SYNC(buf->mlb_dma, DDI_DMA_SYNC_FORCPU);
 	ddi_fm_dma_err_get(buf->mlb_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK) {
@@ -1872,7 +1869,7 @@ mlxcx_rx_completion(mlxcx_t *mlxp, mlxcx_completion_queue_t *mlcq,
 	}
 
 	if (!mlxcx_buf_loan(mlxp, buf)) {
-		mlxcx_warn(mlxp, "loan failed, dropping packet");
+		mlxcx_warn(mlxp, "!loan failed, dropping packet");
 		mlxcx_buf_return(mlxp, buf);
 		return (NULL);
 	}
@@ -1919,7 +1916,10 @@ mlxcx_buf_mp_return(caddr_t arg)
 		b->mlb_mp = NULL;
 		return;
 	}
-	/* The mbuf has been used now, so NULL it out. */
+	/*
+	 * The mbuf for this buffer_t (in its mlb_mp field) has been used now,
+	 * so NULL it out.
+	 */
 	b->mlb_mp = NULL;
 	mlxcx_buf_return(mlxp, b);
 }
@@ -2001,7 +2001,7 @@ mlxcx_buf_take_foreign(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
 	*bp = b;
 }
 
-void
+boolean_t
 mlxcx_buf_bind_or_copy(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
     mblk_t *mpb, size_t off, mlxcx_buffer_t **bp)
 {
@@ -2013,6 +2013,7 @@ mlxcx_buf_bind_or_copy(mlxcx_t *mlxp, mlxcx_work_queue_t *wq,
 	size_t sz;
 	size_t ncookies = 0;
 	boolean_t ret;
+	uint_t attempts = 0;
 
 	for (mp = mpb; mp != NULL; mp = mp->b_cont) {
 		rptr = mp->b_rptr;
@@ -2036,24 +2037,30 @@ copyb:
 			mlxcx_buf_take(mlxp, wq, &b);
 			ASSERT3U(b->mlb_dma.mxdb_len, >=, sz);
 			bcopy(rptr, b->mlb_dma.mxdb_va, sz);
-			(void) ddi_dma_sync(b->mlb_dma.mxdb_dma_handle, 0, 0,
-			    DDI_DMA_SYNC_FORDEV);
+			MLXCX_DMA_SYNC(b->mlb_dma, DDI_DMA_SYNC_FORDEV);
 			ddi_fm_dma_err_get(b->mlb_dma.mxdb_dma_handle, &err,
 			    DDI_FME_VERSION);
 			if (err.fme_status != DDI_FM_OK) {
 				ddi_fm_dma_err_clear(b->mlb_dma.mxdb_dma_handle,
 				    DDI_FME_VERSION);
 				mlxcx_buf_return(mlxp, b);
+				if (++attempts > MLXCX_BUF_BIND_MAX_ATTEMTPS) {
+					*bp = NULL;
+					return (B_FALSE);
+				}
 				goto copyb;
 			}
 		}
 
 		/*
 		 * We might overestimate here when we've copied data, since
-		 * the buffer might be longer than what we copied into it.
+		 * the buffer might be longer than what we copied into it. This
+		 * is safe since it's always wrong in the conservative
+		 * direction (and we will blow up later when we actually
+		 * generate the WQE anyway).
 		 *
 		 * If the assert below ever blows, we'll have to come and fix
-		 * this up.
+		 * this up so we can transmit these packets.
 		 */
 		ncookies += b->mlb_dma.mxdb_ncookies;
 
@@ -2076,6 +2083,7 @@ copyb:
 	ASSERT3U(ncookies, <=, MLXCX_SQE_MAX_PTRS);
 
 	*bp = b0;
+	return (B_TRUE);
 }
 
 void

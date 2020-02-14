@@ -141,6 +141,8 @@ extern uint_t mlxcx_doorbell_tries;
 #define	MLXCX_STUCK_INTR_COUNT_DFLT		128
 extern uint_t mlxcx_stuck_intr_count;
 
+#define	MLXCX_BUF_BIND_MAX_ATTEMTPS		50
+
 #define	MLXCX_MTU_OFFSET	\
 	(sizeof (struct ether_vlan_header) + ETHERFCSL)
 
@@ -294,10 +296,12 @@ typedef struct mlxcx_port {
 	mlxcx_port_init_t	mlp_init;
 	mlxcx_t			*mlp_mlx;
 	/*
-	 * XXX: mlp_num starts at zero, but it seems like the numbering we
-	 * have to use for register access starts at 1. we currently write
-	 * mlp_num into the other_vport fields though so we'll have to fix
-	 * that up?
+	 * The mlp_num we have here starts at zero (it's an index), but the
+	 * numbering we have to use for register access starts at 1. We
+	 * currently write mlp_num into the other_vport fields in mlxcx_cmd.c
+	 * (where 0 is a magic number meaning "my vport") so if we ever add
+	 * support for virtualisation features and deal with more than one
+	 * vport, we will probably have to change this.
 	 */
 	uint_t			mlp_num;
 	mlxcx_port_flags_t	mlp_flags;
@@ -1122,8 +1126,8 @@ extern void mlxcx_buf_return(mlxcx_t *, mlxcx_buffer_t *);
 extern void mlxcx_buf_return_chain(mlxcx_t *, mlxcx_buffer_t *, boolean_t);
 extern void mlxcx_buf_destroy(mlxcx_t *, mlxcx_buffer_t *);
 
-extern void mlxcx_buf_bind_or_copy(mlxcx_t *, mlxcx_work_queue_t *, mblk_t *,
-    size_t, mlxcx_buffer_t **);
+extern boolean_t mlxcx_buf_bind_or_copy(mlxcx_t *, mlxcx_work_queue_t *,
+    mblk_t *, size_t, mlxcx_buffer_t **);
 
 extern boolean_t mlxcx_rx_group_setup(mlxcx_t *, mlxcx_ring_group_t *);
 extern boolean_t mlxcx_tx_group_setup(mlxcx_t *, mlxcx_ring_group_t *);

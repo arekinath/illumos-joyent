@@ -234,12 +234,11 @@ mlxcx_mac_led_set(void *arg, mac_led_mode_t mode, uint_t flags)
 	mlxcx_port_t *port = &mlxp->mlx_ports[0];
 	int ret = 0;
 
-	mutex_enter(&port->mlp_mtx);
-
 	if (flags != 0) {
-		mutex_exit(&port->mlp_mtx);
 		return (EINVAL);
 	}
+
+	mutex_enter(&port->mlp_mtx);
 
 	switch (mode) {
 	case MAC_LED_DEFAULT:
@@ -352,7 +351,10 @@ mlxcx_mac_ring_stat(mac_ring_driver_t rh, uint_t stat, uint64_t *val)
 	mlxcx_work_queue_t *wq = (mlxcx_work_queue_t *)rh;
 	(void)wq;
 
-	/* XXX: use hw flow counters to get stats here? */
+	/*
+	 * We should add support for using hw flow counters and such to
+	 * get per-ring statistics. Not done yet though!
+	 */
 
 	switch (stat) {
 	default:
@@ -397,8 +399,12 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 
 	mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &chkflags);
 
-	if (mac_vlan_header_info(mlxp->mlx_mac_hdl, mp, &mhi)) {
-		/* ??? */
+	if (mac_vlan_header_info(mlxp->mlx_mac_hdl, mp, &mhi) != 0) {
+		/*
+		 * We got given a frame without a valid L2 header on it. We
+		 * can't really transmit that (mlx parts don't like it), so
+		 * we will just drop it on the floor.
+		 */
 		freemsg(mp);
 		return (NULL);
 	}
@@ -408,7 +414,8 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 	kmp = mp;
 	off = 0;
 	while (rem > 0) {
-		const ptrdiff_t sz = kmp->b_wptr - kmp->b_rptr;
+		const ptrdiff_t sz = MBLKL(kmp);
+		ASSERT3S(sz, >=, 0);
 		ASSERT3U(sz, <=, SIZE_MAX);
 		take = sz;
 		if (take > rem)
@@ -422,7 +429,16 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 		}
 	}
 
-	mlxcx_buf_bind_or_copy(mlxp, sq, kmp, take, &b);
+	if (!mlxcx_buf_bind_or_copy(mlxp, sq, kmp, take, &b)) {
+		/*
+		 * Something went really wrong, and we probably will never be
+		 * able to TX again (all our buffers are broken and DMA is
+		 * failing). Drop the packet on the floor -- FMA should be
+		 * reporting this error elsewhere.
+		 */
+		freemsg(mp);
+		return (NULL);
+	}
 
 	mutex_enter(&sq->mlwq_mtx);
 	VERIFY3U(sq->mlwq_inline_mode, <=, MLXCX_ETH_INLINE_L2);
@@ -433,6 +449,7 @@ mlxcx_mac_ring_tx(void *arg, mblk_t *mp)
 	 * should be fine.
 	 */
 	if (cq->mlcq_state & MLXCX_CQ_TEARDOWN) {
+		mutex_exit(&sq->mlwq_mtx);
 		mlxcx_buf_return_chain(mlxp, b, B_FALSE);
 		return (NULL);
 	}
@@ -510,6 +527,15 @@ mlxcx_mac_setpromisc(void *arg, boolean_t on)
 		}
 	}
 	mutex_exit(&ft->mlft_mtx);
+
+	/*
+	 * If we failed to change the top-level entry, don't bother with
+	 * trying the per-group ones.
+	 */
+	if (ret != 0) {
+		mutex_exit(&port->mlp_mtx);
+		return (ret);
+	}
 
 	/*
 	 * Then, do the per-rx-group flow entries which catch traffic that
@@ -668,6 +694,8 @@ mlxcx_mac_ring_start(mac_ring_driver_t rh, uint64_t gen_num)
 	ASSERT(cq != NULL);
 	ASSERT(g != NULL);
 
+	ASSERT(wq->mlwq_type == MLXCX_WQ_TYPE_SENDQ ||
+	    wq->mlwq_type == MLXCX_WQ_TYPE_RECVQ);
 	if (wq->mlwq_type == MLXCX_WQ_TYPE_SENDQ &&
 	    !mlxcx_tx_ring_start(mlxp, g, wq))
 		return (EIO);
@@ -1081,11 +1109,13 @@ mlxcx_mac_setprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 		if (!mlxcx_cmd_modify_nic_vport_ctx(mlxp, port,
 		    MLXCX_MODIFY_NIC_VPORT_CTX_MTU)) {
 			port->mlp_mtu = old_mtu;
+			(void) mac_maxsdu_update(mlxp->mlx_mac_hdl, old_mtu);
 			ret = EIO;
 			break;
 		}
 		if (!mlxcx_cmd_set_port_mtu(mlxp, port)) {
 			port->mlp_mtu = old_mtu;
+			(void) mac_maxsdu_update(mlxp->mlx_mac_hdl, old_mtu);
 			ret = EIO;
 			break;
 		}

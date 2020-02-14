@@ -423,6 +423,7 @@
 #include <sys/conf.h>
 #include <sys/devops.h>
 #include <sys/sysmacros.h>
+#include <sys/time.h>
 
 #include <sys/mac_provider.h>
 
@@ -602,6 +603,10 @@ mlxcx_put64(mlxcx_t *mlxp, uintptr_t off, uint64_t val)
 void
 mlxcx_uar_put32(mlxcx_t *mlxp, mlxcx_uar_t *mlu, uintptr_t off, uint32_t val)
 {
+	/*
+	 * The UAR is always inside the first BAR, which we mapped as
+	 * mlx_regs
+	 */
 	uintptr_t addr = off + (uintptr_t)mlu->mlu_base +
 	    (uintptr_t)mlxp->mlx_regs_base;
 	ddi_put32(mlxp->mlx_regs_handle, (void *)addr, val);
@@ -629,6 +634,8 @@ mlxcx_fm_fini(mlxcx_t *mlxp)
 		pci_ereport_teardown(mlxp->mlx_dip);
 
 	ddi_fm_fini(mlxp->mlx_dip);
+
+	mlxp->mlx_fm_caps = 0;
 }
 
 void
@@ -637,13 +644,14 @@ mlxcx_fm_ereport(mlxcx_t *mlxp, const char *detail)
 	uint64_t ena;
 	char buf[FM_MAX_CLASS];
 
+	if (!DDI_FM_EREPORT_CAP(mlxp->mlx_fm_caps))
+		return;
+
 	(void) snprintf(buf, FM_MAX_CLASS, "%s.%s", DDI_FM_DEVICE, detail);
 	ena = fm_ena_generate(0, FM_ENA_FMT1);
-	if (DDI_FM_EREPORT_CAP(mlxp->mlx_fm_caps)) {
-		ddi_fm_ereport_post(mlxp->mlx_dip, buf, ena, DDI_NOSLEEP,
-		    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
-		    NULL);
-	}
+	ddi_fm_ereport_post(mlxp->mlx_dip, buf, ena, DDI_NOSLEEP,
+	    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+	    NULL);
 }
 
 static int
@@ -887,6 +895,10 @@ mlxcx_teardown_ports(mlxcx_t *mlxp)
 		mutex_enter(&p->mlp_mtx);
 		if ((ft = p->mlp_rx_flow) != NULL) {
 			mutex_enter(&ft->mlft_mtx);
+			/*
+			 * teardown_flow_table() will destroy the mutex, so
+			 * we don't release it here.
+			 */
 			mlxcx_teardown_flow_table(mlxp, ft);
 		}
 		mutex_exit(&p->mlp_mtx);
@@ -1259,13 +1271,13 @@ mlxcx_mlbs_create(mlxcx_t *mlxp)
 
 	s = kmem_zalloc(sizeof (mlxcx_buf_shard_t), KM_SLEEP);
 
-	mutex_init(&s->mlbs_mtx, "mlxcx_bufs_shard_mtx", MUTEX_DRIVER,
+	mutex_init(&s->mlbs_mtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	list_create(&s->mlbs_busy, sizeof (mlxcx_buffer_t),
 	    offsetof(mlxcx_buffer_t, mlb_entry));
 	list_create(&s->mlbs_free, sizeof (mlxcx_buffer_t),
 	    offsetof(mlxcx_buffer_t, mlb_entry));
-	cv_init(&s->mlbs_free_nonempty, "mlxcx_bufs_free_cv", CV_DRIVER, NULL);
+	cv_init(&s->mlbs_free_nonempty, NULL, CV_DRIVER, NULL);
 
 	list_insert_tail(&mlxp->mlx_buf_shards, s);
 
@@ -1566,17 +1578,17 @@ mlxcx_setup_checktimers(mlxcx_t *mlxp)
 {
 	if (mlxp->mlx_props.mldp_eq_check_interval_sec > 0) {
 		mlxp->mlx_eq_checktimer = ddi_periodic_add(mlxcx_eq_check, mlxp,
-		    mlxp->mlx_props.mldp_eq_check_interval_sec * 1000000000ULL,
+		    mlxp->mlx_props.mldp_eq_check_interval_sec * NANOSEC,
 		    DDI_IPL_0);
 	}
 	if (mlxp->mlx_props.mldp_cq_check_interval_sec > 0) {
 		mlxp->mlx_cq_checktimer = ddi_periodic_add(mlxcx_cq_check, mlxp,
-		    mlxp->mlx_props.mldp_cq_check_interval_sec * 1000000000ULL,
+		    mlxp->mlx_props.mldp_cq_check_interval_sec * NANOSEC,
 		    DDI_IPL_0);
 	}
 	if (mlxp->mlx_props.mldp_wq_check_interval_sec > 0) {
 		mlxp->mlx_wq_checktimer = ddi_periodic_add(mlxcx_wq_check, mlxp,
-		    mlxp->mlx_props.mldp_wq_check_interval_sec * 1000000000ULL,
+		    mlxp->mlx_props.mldp_wq_check_interval_sec * NANOSEC,
 		    DDI_IPL_0);
 	}
 	return (B_TRUE);
@@ -1648,7 +1660,7 @@ mlxcx_setup_ports(mlxcx_t *mlxp)
 		p = &mlxp->mlx_ports[i];
 		p->mlp_num = i;
 		p->mlp_init |= MLXCX_PORT_INIT;
-		mutex_init(&p->mlp_mtx, "mlx_port_mtx", MUTEX_DRIVER,
+		mutex_init(&p->mlp_mtx, NULL, MUTEX_DRIVER,
 		    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 		mutex_enter(&p->mlp_mtx);
 		if (!mlxcx_cmd_query_nic_vport_ctx(mlxp, p)) {
@@ -1681,7 +1693,7 @@ mlxcx_setup_ports(mlxcx_t *mlxp)
 		mutex_enter(&p->mlp_mtx);
 		p->mlp_rx_flow = (ft = kmem_zalloc(sizeof (mlxcx_flow_table_t),
 		    KM_SLEEP));
-		mutex_init(&ft->mlft_mtx, "mlx_rx_flow_mtx", MUTEX_DRIVER,
+		mutex_init(&ft->mlft_mtx, NULL, MUTEX_DRIVER,
 		    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 
 		mutex_enter(&ft->mlft_mtx);
@@ -2236,6 +2248,8 @@ mlxcx_setup_eqs(mlxcx_t *mlxp)
 	uint_t i;
 	mlxcx_event_queue_t *mleq;
 
+	ASSERT3S(mlxp->mlx_intr_count, >, 0);
+
 	for (i = 1; i < mlxp->mlx_intr_count; ++i) {
 		mleq = &mlxp->mlx_eqs[i];
 		mutex_enter(&mleq->mleq_mtx);
@@ -2270,14 +2284,14 @@ mlxcx_setup_eqs(mlxcx_t *mlxp)
 
 /*
  * Snapshot all of the hardware capabilities that we care about and then modify
- * the HCA capabilities to get things moving..
+ * the HCA capabilities to get things moving.
  */
 static boolean_t
 mlxcx_init_caps(mlxcx_t *mlxp)
 {
 	mlxcx_caps_t *c;
 
-	mlxp->mlx_caps = (c = kmem_zalloc(sizeof (mlxcx_caps_t), KM_SLEEP));
+	mlxp->mlx_caps = c = kmem_zalloc(sizeof (mlxcx_caps_t), KM_SLEEP);
 
 	if (!mlxcx_cmd_query_hca_cap(mlxp, MLXCX_HCA_CAP_GENERAL,
 	    MLXCX_HCA_CAP_MODE_CURRENT, &c->mlc_hca_cur)) {
@@ -2315,11 +2329,13 @@ mlxcx_init_caps(mlxcx_t *mlxp)
 	const mlxcx_hca_cap_general_caps_t *gen = &c->mlc_hca_cur.mhc_general;
 
 	if (gen->mlcap_general_log_pg_sz != 12) {
-		mlxcx_warn(mlxp, "!hardware has page size != 4k");
+		mlxcx_warn(mlxp, "!hardware has page size != 4k "
+		    "(log_pg_sz = %u)", (uint_t)gen->mlcap_general_log_pg_sz);
 		goto err;
 	}
 	if (gen->mlcap_general_cqe_version != 1) {
-		mlxcx_warn(mlxp, "!hardware does not support CQE v1");
+		mlxcx_warn(mlxp, "!hardware does not support CQE v1 "
+		    "(cqe_ver = %u)", (uint_t)gen->mlcap_general_cqe_version);
 		goto err;
 	}
 	if (gen->mlcap_general_port_type !=
@@ -2496,7 +2512,7 @@ mlxcx_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 	mlxp->mlx_attach |= MLXCX_ATTACH_INTRS;
 
-	mutex_init(&mlxp->mlx_pagemtx, "mlx_pagemtx", MUTEX_DRIVER,
+	mutex_init(&mlxp->mlx_pagemtx, NULL, MUTEX_DRIVER,
 	    DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	avl_create(&mlxp->mlx_pages, mlxcx_page_compare,
 	    sizeof (mlxcx_dev_page_t), offsetof(mlxcx_dev_page_t, mxdp_tree));
@@ -2532,7 +2548,7 @@ mlxcx_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto err;
 	}
 	for (i = 0; i < MLXCX_BF_PER_UAR; ++i) {
-		mutex_init(&mlxp->mlx_uar.mlu_bf[i].mbf_mtx, "mlx_uar_bf_mtx",
+		mutex_init(&mlxp->mlx_uar.mlu_bf[i].mbf_mtx, NULL,
 		    MUTEX_DRIVER, DDI_INTR_PRI(mlxp->mlx_intr_pri));
 	}
 	mlxp->mlx_attach |= MLXCX_ATTACH_UAR_PD_TD;

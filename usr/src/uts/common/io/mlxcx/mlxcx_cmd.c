@@ -519,8 +519,8 @@ mlxcx_cmd_queue_init(mlxcx_t *mlxp)
 	cmd->mcmd_size_l2 = MLXCX_ISS_CMDQ_SIZE(cmd_low);
 	cmd->mcmd_stride_l2 = MLXCX_ISS_CMDQ_STRIDE(cmd_low);
 
-	mutex_init(&cmd->mcmd_lock, "mlxcx_cmd_queue_lock", MUTEX_DRIVER, NULL);
-	cv_init(&cmd->mcmd_cv, "mlxcx_cmd_queue_cv", CV_DRIVER, NULL);
+	mutex_init(&cmd->mcmd_lock, NULL, MUTEX_DRIVER, NULL);
+	cv_init(&cmd->mcmd_cv, NULL, CV_DRIVER, NULL);
 	cmd->mcmd_status = MLXCX_CMD_QUEUE_S_IDLE;
 
 	(void) snprintf(buf, sizeof (buf), "mlxcx_tokens_%d", mlxp->mlx_inst);
@@ -875,7 +875,7 @@ mlxcx_cmd_send(mlxcx_t *mlxp, mlxcx_cmd_t *cmd, const void *in, uint32_t inlen,
 	}
 
 	if (outlen > MLXCX_CMD_INLINE_OUTPUT_LEN) {
-		uint32_t need = outlen - MLXCX_CMD_INLINE_INPUT_LEN;
+		uint32_t need = outlen - MLXCX_CMD_INLINE_OUTPUT_LEN;
 		uint8_t nblocks;
 
 		if (need / MLXCX_CMD_MAILBOX_LEN + 1 > UINT8_MAX) {
@@ -2336,8 +2336,7 @@ mlxcx_cmd_start_rq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	ASSERT(list_is_empty(&mlwq->mlwq_cq->mlcq_buffers_b));
 
 	mlwq->mlwq_doorbell->mlwqd_recv_counter = to_be16(0);
-	(void) ddi_dma_sync(mlwq->mlwq_doorbell_dma.mxdb_dma_handle,
-	    0, 0, DDI_DMA_SYNC_FORDEV);
+	MLXCX_DMA_SYNC(mlwq->mlwq_doorbell_dma, DDI_DMA_SYNC_FORDEV);
 	ddi_fm_dma_err_get(mlwq->mlwq_doorbell_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK)
@@ -3222,8 +3221,7 @@ mlxcx_cmd_start_sq(mlxcx_t *mlxp, mlxcx_work_queue_t *mlwq)
 	ASSERT(list_is_empty(&mlwq->mlwq_cq->mlcq_buffers_b));
 
 	mlwq->mlwq_doorbell->mlwqd_recv_counter = to_be16(0);
-	(void) ddi_dma_sync(mlwq->mlwq_doorbell_dma.mxdb_dma_handle,
-	    0, 0, DDI_DMA_SYNC_FORDEV);
+	MLXCX_DMA_SYNC(mlwq->mlwq_doorbell_dma, DDI_DMA_SYNC_FORDEV);
 	ddi_fm_dma_err_get(mlwq->mlwq_doorbell_dma.mxdb_dma_handle, &err,
 	    DDI_FME_VERSION);
 	if (err.fme_status != DDI_FM_OK)
