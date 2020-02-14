@@ -225,11 +225,6 @@ typedef struct mlxcx_dev_page {
 /*
  * Data structure to keep track of all information related to the command queue.
  */
-typedef enum {
-	MLXCX_CMD_QUEUE_S_IDLE = 1,
-	MLXCX_CMD_QUEUE_S_BUSY,
-	MLXCX_CMD_QUEUE_S_BROKEN
-} mlxcx_cmd_queue_status_t;
 
 typedef struct mlxcx_cmd_queue {
 	kmutex_t		mcmd_lock;
