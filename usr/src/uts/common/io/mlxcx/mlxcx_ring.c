@@ -1917,7 +1917,7 @@ mlxcx_buf_mp_return(caddr_t arg)
 		return;
 	}
 	/*
-	 * The mbuf for this buffer_t (in its mlb_mp field) has been used now,
+	 * The mblk for this buffer_t (in its mlb_mp field) has been used now,
 	 * so NULL it out.
 	 */
 	b->mlb_mp = NULL;
