@@ -2495,6 +2495,16 @@ mlxcx_init_caps(mlxcx_t *mlxp)
 		mlxcx_warn(mlxp, "failed to obtain maximum HCA flow caps");
 	}
 
+	if (!mlxcx_cmd_query_hca_cap(mlxp, MLXCX_HCA_CAP_ESWITCH,
+	    MLXCX_HCA_CAP_MODE_CURRENT, &c->mlc_esw_cur)) {
+		mlxcx_warn(mlxp, "failed to obtain current HCA esw caps");
+	}
+
+	if (!mlxcx_cmd_query_hca_cap(mlxp, MLXCX_HCA_CAP_ESWITCH,
+	    MLXCX_HCA_CAP_MODE_MAX, &c->mlc_esw_max)) {
+		mlxcx_warn(mlxp, "failed to obtain maximum HCA esw caps");
+	}
+
 	/*
 	 * Check the caps meet our requirements.
 	 */
@@ -2557,6 +2567,11 @@ mlxcx_init_caps(mlxcx_t *mlxp)
 	    mlcap_flow_nic_rx.mlcap_flow_prop_log_max_ft_num);
 	c->mlc_max_rx_fe_dest = (1 << c->mlc_nic_flow_cur.mhc_flow.
 	    mlcap_flow_nic_rx.mlcap_flow_prop_log_max_destination);
+
+	if (get_bit32(c->mlc_esw_cur.mhc_esw.mlcap_esw_flags,
+	    MLXCX_ESW_CAP_FLAG_ROOT_FT_ON_OTHER_ESW)) {
+		c->mlc_esw_root_ft = B_TRUE;
+	}
 
 	return (B_TRUE);
 

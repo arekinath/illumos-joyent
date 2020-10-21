@@ -956,6 +956,7 @@ typedef struct mlxcx_hca_cap {
 		mlxcx_hca_cap_general_caps_t	mhc_general;
 		mlxcx_hca_cap_eth_caps_t	mhc_eth;
 		mlxcx_hca_cap_flow_caps_t	mhc_flow;
+		mlxcx_hca_cap_esw_caps_t	mhc_esw;
 	};
 } mlxcx_hca_cap_t;
 
@@ -964,6 +965,7 @@ typedef struct {
 	boolean_t		mlc_checksum;
 	boolean_t		mlc_lso;
 	boolean_t		mlc_vxlan;
+	boolean_t		mlc_esw_root_ft;
 	size_t			mlc_max_lso_size;
 	size_t			mlc_max_rqt_size;
 
@@ -981,6 +983,8 @@ typedef struct {
 	mlxcx_hca_cap_t		mlc_ether_max;
 	mlxcx_hca_cap_t		mlc_nic_flow_cur;
 	mlxcx_hca_cap_t		mlc_nic_flow_max;
+	mlxcx_hca_cap_t		mlc_esw_cur;
+	mlxcx_hca_cap_t		mlc_esw_max;
 } mlxcx_caps_t;
 
 typedef struct {

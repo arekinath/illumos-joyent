@@ -2901,6 +2901,7 @@ mlxcx_cmd_set_flow_table_root(mlxcx_t *mlxp, mlxcx_flow_table_t *mlft)
 	mlxcx_cmd_set_flow_table_root_in_t in;
 	mlxcx_cmd_set_flow_table_root_out_t out;
 	boolean_t ret;
+	size_t inlen;
 
 	bzero(&in, sizeof (in));
 	bzero(&out, sizeof (out));
@@ -2913,12 +2914,23 @@ mlxcx_cmd_set_flow_table_root(mlxcx_t *mlxp, mlxcx_flow_table_t *mlft)
 	mlxcx_cmd_in_header_init(&cmd, &in.mlxi_set_flow_table_root_head,
 	    MLXCX_OP_SET_FLOW_TABLE_ROOT, 0);
 
+	/*
+	 * This command changed length around the CX-5 era due to the new
+	 * eswitch-related capabilities. If we have an older part, send the
+	 * old length. We don't (yet) use these new fields anyway.
+	 */
+	inlen = sizeof (in);
+	if (mlxp->mlx_caps->mlc_esw_root_ft == B_FALSE) {
+		inlen = offsetof (mlxcx_cmd_set_flow_table_root_in_t,
+		    mlxi_set_flow_table_root_esw_owner_vhca_id_valid);
+	}
+
 	in.mlxi_set_flow_table_root_vport_number =
 	    to_be16(mlft->mlft_port->mlp_num);
 	in.mlxi_set_flow_table_root_table_type = mlft->mlft_type;
 	in.mlxi_set_flow_table_root_table_id = to_be24(mlft->mlft_num);
 
-	if (!mlxcx_cmd_send(mlxp, &cmd, &in, sizeof (in), &out, sizeof (out))) {
+	if (!mlxcx_cmd_send(mlxp, &cmd, &in, inlen, &out, sizeof (out))) {
 		mlxcx_cmd_fini(mlxp, &cmd);
 		return (B_FALSE);
 	}
@@ -3738,3 +3750,9 @@ CTASSERT(offsetof(mlxcx_cmd_access_register_in_t,
 
 CTASSERT(offsetof(mlxcx_cmd_access_register_out_t,
     mlxo_access_register_data) == 0x10);
+
+CTASSERT(sizeof (mlxcx_cmd_set_flow_table_root_in_t) == 64);
+CTASSERT(offsetof(mlxcx_cmd_set_flow_table_root_in_t,
+    mlxi_set_flow_table_root_table_id) == 0x15);
+CTASSERT(offsetof(mlxcx_cmd_set_flow_table_root_in_t,
+    mlxi_set_flow_table_root_esw_owner_vhca_id_valid) == 0x1C);

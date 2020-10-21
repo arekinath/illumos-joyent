@@ -1528,6 +1528,20 @@ typedef struct {
 	mlxcx_hca_cap_flow_cap_props_t	mlcap_flow_nic_tx_sniffer;
 } mlxcx_hca_cap_flow_caps_t;
 
+typedef enum {
+	MLXCX_ESW_CAP_FLAG_ROOT_FT_ON_OTHER_ESW = (1<<22)
+} mlxcx_esw_cap_flags_t;
+
+typedef struct {
+	bits32_t	mlcap_esw_flags;
+	bits8_t		mlcap_esw_flags2;
+	uint8_t		mlcap_esw_log_max_pkt_ref_ctx;
+	uint16be_t	mlcap_esw_max_encap_hdr_size;
+	uint8_t		mlcap_esw_rsvd;
+	uint8_t		mlcap_esw_log_max_esw_sf;
+	uint16be_t	mlcap_esw_sf_base_id;
+} mlxcx_hca_cap_esw_caps_t;
+
 /*
  * Size of a buffer that is required to hold the output data.
  */
@@ -2082,6 +2096,10 @@ typedef struct {
 	uint8_t		mlxi_set_flow_table_root_rsvd3[4];
 	uint24be_t	mlxi_set_flow_table_root_table_id;
 	uint8_t		mlxi_set_flow_table_root_rsvd4[4];
+	uint8_t		mlxi_set_flow_table_root_esw_owner_vhca_id_valid;
+	uint8_t		mlxi_set_flow_table_root_rsvd5;
+	uint16be_t	mlxi_set_flow_table_root_esw_owner_vhca_id;
+	uint8_t		mlxi_set_flow_table_root_rsvd6[32];
 } mlxcx_cmd_set_flow_table_root_in_t;
 
 typedef struct {
