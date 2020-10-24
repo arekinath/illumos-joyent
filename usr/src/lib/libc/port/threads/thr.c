@@ -1448,6 +1448,7 @@ libc_init(void)
 		/* tls_size was zero when oldself was allocated */
 		lfree(oldself, sizeof (ulwp_t));
 	}
+	ssp_init();
 	mutex_setup();
 	atfork_init();
 	signal_init();
