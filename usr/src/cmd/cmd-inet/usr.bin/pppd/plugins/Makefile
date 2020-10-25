@@ -26,7 +26,7 @@
 #
 
 MINCONN =	minconn.so
-PASSPROMPT = 	passprompt.so
+PASSPROMPT =	passprompt.so
 PPPOE =		pppoe.so
 
 LIBRARIES =	minconn.so passprompt.so pppoe.so
@@ -54,9 +54,8 @@ $(PPPOE):=	MAPFILES = mapfile-pppoe
 
 # A bug in pmake causes redundancy when '+=' is conditionally assigned, so
 # '=' is used with extra variables.
-XXXLDLIBS =
-$(PASSPROMPT):=	XXXLDLIBS = -lc
-LDLIBS +=	$(XXXLDLIBS)
+$(PASSPROMPT):=	LDLIBS += -lc
+$(PPPOE):=	LDLIBS += -lc
 
 CPPFLAGS +=	-I.. -I$(SRC)/uts/common
 # XX64 -- this should not be needed -- fix me

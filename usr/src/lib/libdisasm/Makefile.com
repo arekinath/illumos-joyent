@@ -124,6 +124,11 @@ CERRWARN +=	$(CNOWARN_UNINIT)
 # not linted
 SMATCH=off
 
+#
+# XXX Fighting with stack protector and standalone is a pain right now.
+#
+STACKPROTECT = none
+
 # We want the thread-specific errno in the library, but we don't want it in
 # the standalone.  $(DTS_ERRNO) is designed to add -D_TS_ERRNO to $(CPPFLAGS),
 # in order to enable this feature.  Conveniently, -D_REENTRANT does the same
