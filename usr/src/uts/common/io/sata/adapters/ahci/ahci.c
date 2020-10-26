@@ -6039,18 +6039,16 @@ ahci_setup_port_base_addresses(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp)
 	ASSERT(MUTEX_HELD(&ahci_portp->ahciport_mutex));
 
 	/* Step 1: Make sure both PxCMD.ST and PxCMD.CR are cleared. */
-	if (port_cmd_status & (AHCI_CMD_STATUS_ST | AHCI_CMD_STATUS_CR)) {
+	if (port_cmd_status & (AHCI_CMD_STATUS_ST | AHCI_CMD_STATUS_CR |
+	    AHCI_CMD_STATUS_FRE | AHCI_CMD_STATUS_FR)) {
+		int loop_count = 0;
+
 		if (ahci_put_port_into_notrunning_state(ahci_ctlp, ahci_portp,
 		    port) != AHCI_SUCCESS)
 			return (AHCI_FAILURE);
 
 		port_cmd_status = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
 		    (uint32_t *)AHCI_PORT_PxCMD(ahci_ctlp, port));
-	}
-
-	/* Step 2: Make sure both PxCMD.FRE and PxCMD.FR are cleared. */
-	if (port_cmd_status & (AHCI_CMD_STATUS_FRE | AHCI_CMD_STATUS_FR)) {
-		int loop_count = 0;
 
 		/* Clear PxCMD.FRE */
 		port_cmd_status &= ~AHCI_CMD_STATUS_FRE;

@@ -569,13 +569,13 @@ _NOTE(MUTEX_PROTECTS_DATA(ahci_ctl_t::ahcictl_mutex,
 /*
  * The following values are the numbers of times to retry polled requests.
  */
-#define	AHCI_POLLRATE_HBA_RESET		100
+#define	AHCI_POLLRATE_HBA_RESET		1000
 #define	AHCI_POLLRATE_PORT_SSTATUS	10
 #define	AHCI_POLLRATE_PORT_TFD_ERROR	1100
-#define	AHCI_POLLRATE_PORT_IDLE		50
-#define	AHCI_POLLRATE_PORT_SOFTRESET	100
+#define	AHCI_POLLRATE_PORT_IDLE		1000
+#define	AHCI_POLLRATE_PORT_SOFTRESET	1000
 #define	AHCI_POLLRATE_GET_SPKT		100
-#define	AHCI_POLLRATE_PORT_IDLE_FR	500
+#define	AHCI_POLLRATE_PORT_IDLE_FR	10000
 
 
 /* Clearing & setting the n'th bit in a given tag */
