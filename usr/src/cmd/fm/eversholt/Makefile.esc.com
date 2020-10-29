@@ -39,12 +39,10 @@ CMNOBJS = alloc.o check.o eftread.o esclex.o io.o literals.o lut.o \
 COMMONOBJS = escparse.o $(CMNOBJS)
 COMMONSRCS = $(COMMONOBJS:%.o=$(EVERCMNSRC)/%.c)
 
-LINTSRCS = $(CMNOBJS:%.o=$(EVERCMNSRC)/%.c)
-LINTFLAGS = -mnux
-
 $(NOT_RELEASE_BUILD)CPPFLAGS += -DDEBUG
 
-CPPFLAGS += -I$(EVERCMNSRC) -I.
+BASECPPFLAGS = -I$(EVERCMNSRC) -I.
+CPPFLAGS += $(BASECPPFLAGS)
 CFLAGS += $(CCVERBOSE)
 CERRWARN += $(CNOWARN_UNINIT)
 CERRWARN += -_gcc=-Wno-unused-label
@@ -66,9 +64,6 @@ install: $(PROG) $(ROOTPROG)
 
 install_h: $(ROOTHDIR) $(ROOTHDRS)
 
-lint:	$(LINTSRCS)
-	$(LINT.c) $(LINTSRCS) $(LDLIBS)
-
 %.o: %.c
 	$(COMPILE.c) $<
 	$(CTFCONVO)
@@ -87,4 +82,3 @@ $(ROOTPDIR):
 
 $(ROOTPDIR)/%: % $(ROOTPDIR)
 	$(INS.file)
-
