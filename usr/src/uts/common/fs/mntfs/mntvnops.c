@@ -845,6 +845,7 @@ mntopen(vnode_t **vpp, int flag, cred_t *cr, caller_context_t *ct)
 	 */
 	if (flag & FWRITE)
 		return (EPERM);
+
 	/*
 	 * Create a new mnt/vnode for each open, this will give us a handle to
 	 * hang the snapshot on.
@@ -852,8 +853,8 @@ mntopen(vnode_t **vpp, int flag, cred_t *cr, caller_context_t *ct)
 	nmnp = mntgetnode(vp);
 
 	*vpp = MTOV(nmnp);
-	atomic_inc_32(&MTOD(nmnp)->mnt_nopen);
 	VN_RELE(vp);
+
 	return (0);
 }
 
@@ -868,15 +869,12 @@ mntclose(vnode_t *vp, int flag, int count, offset_t offset, cred_t *cr,
 	cleanlocks(vp, ttoproc(curthread)->p_pid, 0);
 	cleanshares(vp, ttoproc(curthread)->p_pid);
 
-	if (count > 1)
-		return (0);
-	if (vp->v_count == 1) {
-		rw_enter(&mnp->mnt_contents, RW_WRITER);
-		mntfs_freesnap(mnp, &mnp->mnt_read);
-		mntfs_freesnap(mnp, &mnp->mnt_ioctl);
-		rw_exit(&mnp->mnt_contents);
-		atomic_dec_32(&MTOD(mnp)->mnt_nopen);
-	}
+	/*
+	 * Snapshot cleanup and freeing the mntnode_t is done by mntinactive(),
+	 * since there might still be a hold on the vnode after mntclose()
+	 * (e.g. for an outstanding syscall in another thread).
+	 */
+
 	return (0);
 }
 
@@ -1140,12 +1138,15 @@ mntgetnode(vnode_t *dp)
 	mnp->mnt_vnode = vn_alloc(KM_SLEEP);
 	mnp->mnt_mountvp = VTOM(dp)->mnt_mountvp;
 	rw_init(&mnp->mnt_contents, NULL, RW_DEFAULT, NULL);
+
 	vp = MTOV(mnp);
 	vp->v_flag = VNOCACHE|VNOMAP|VNOSWAP|VNOMOUNT;
 	vn_setops(vp, mntvnodeops);
 	vp->v_vfsp = dp->v_vfsp;
 	vp->v_type = VREG;
 	vp->v_data = (caddr_t)mnp;
+
+	atomic_inc_32(&MTOD(mnp)->mnt_nopen);
 
 	return (mnp);
 }
@@ -1157,6 +1158,11 @@ static void
 mntfreenode(mntnode_t *mnp)
 {
 	vnode_t *vp = MTOV(mnp);
+
+	atomic_dec_32(&MTOD(mnp)->mnt_nopen);
+
+	mntfs_freesnap(mnp, &mnp->mnt_read);
+	mntfs_freesnap(mnp, &mnp->mnt_ioctl);
 
 	rw_destroy(&mnp->mnt_contents);
 	vn_invalid(vp);
