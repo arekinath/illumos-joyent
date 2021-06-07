@@ -73,8 +73,9 @@ aggr_port_destructor(void *buf, void *arg)
 
 	ASSERT3P(port->lp_mnh, ==, NULL);
 	ASSERT(!port->lp_tx_grp_added);
-	for (uint_t i = 0; i < MAX_GROUPS_PER_PORT; i++)
+	for (uint_t i = 0; i < port->lp_hwgh_count; i++)
 		ASSERT3P(port->lp_hwghs[i], ==, NULL);
+	kmem_free(port->lp_hwghs, port->lp_hwghs_size);
 }
 
 void
@@ -147,6 +148,8 @@ aggr_port_create(aggr_grp_t *grp, const datalink_id_t linkid, boolean_t force,
 	char port_name[MAXNAMELEN];
 	mac_diag_t diag;
 	mac_unicast_handle_t mah;
+	mac_perim_handle_t mph;
+	uint_t num_rgroups;
 
 	*pp = NULL;
 
@@ -255,6 +258,14 @@ aggr_port_create(aggr_grp_t *grp, const datalink_id_t linkid, boolean_t force,
 
 	/* LACP related state */
 	port->lp_collector_enabled = B_FALSE;
+
+	/* Allocate the set of rx group handles. */
+	mac_perim_enter_by_mh(port->lp_mh, &mph);
+	num_rgroups = mac_get_num_rx_groups(port->lp_mh);
+	mac_perim_exit(mph);
+	port->lp_hwgh_count = num_rgroups;
+	port->lp_hwghs_size = sizeof (mac_group_handle_t) * num_rgroups;
+	port->lp_hwghs = kmem_zalloc(port->lp_hwghs_size, KM_SLEEP);
 
 	*pp = port;
 	return (0);
@@ -593,7 +604,7 @@ aggr_port_addmac(aggr_port_t *port, uint_t idx, const uint8_t *mac_addr)
 	int			err;
 
 	ASSERT(MAC_PERIM_HELD(port->lp_grp->lg_mh));
-	ASSERT3U(idx, <, MAX_GROUPS_PER_PORT);
+	ASSERT3U(idx, <, port->lp_grp->lg_rx_group_count);
 	mac_perim_enter_by_mh(port->lp_mh, &pmph);
 
 	/*
@@ -602,7 +613,7 @@ aggr_port_addmac(aggr_port_t *port, uint_t idx, const uint8_t *mac_addr)
 	 * let the aggr SW classify its traffic. This scenario happens
 	 * when mixing ports with a different number of HW groups.
 	 */
-	if (port->lp_hwghs[idx] == NULL)
+	if (idx >= port->lp_hwgh_count || port->lp_hwghs[idx] == NULL)
 		idx = 0;
 
 	/*
@@ -657,7 +668,7 @@ aggr_port_remmac(aggr_port_t *port, uint_t idx, const uint8_t *mac_addr)
 	mac_perim_handle_t	pmph;
 
 	ASSERT(MAC_PERIM_HELD(grp->lg_mh));
-	ASSERT3U(idx, <, MAX_GROUPS_PER_PORT);
+	ASSERT3U(idx, <, grp->lg_rx_group_count);
 	mac_perim_enter_by_mh(port->lp_mh, &pmph);
 
 	/*
@@ -684,7 +695,7 @@ aggr_port_remmac(aggr_port_t *port, uint_t idx, const uint8_t *mac_addr)
 			(void) aggr_port_promisc(port, B_FALSE);
 	} else {
 		/* See comment in aggr_port_addmac(). */
-		if (port->lp_hwghs[idx] == NULL)
+		if (idx >= port->lp_hwgh_count || port->lp_hwghs[idx] == NULL)
 			idx = 0;
 
 		ASSERT3P(port->lp_hwghs[idx], !=, NULL);
@@ -701,11 +712,11 @@ aggr_port_addvlan(aggr_port_t *port, uint_t idx, uint16_t vid)
 	int			err;
 
 	ASSERT(MAC_PERIM_HELD(port->lp_grp->lg_mh));
-	ASSERT3U(idx, <, MAX_GROUPS_PER_PORT);
+	ASSERT3U(idx, <, port->lp_grp->lg_rx_group_count);
 	mac_perim_enter_by_mh(port->lp_mh, &pmph);
 
 	/* See comment in aggr_port_addmac(). */
-	if (port->lp_hwghs[idx] == NULL)
+	if (idx >= port->lp_hwgh_count || port->lp_hwghs[idx] == NULL)
 		idx = 0;
 
 	/*
@@ -714,7 +725,7 @@ aggr_port_addvlan(aggr_port_t *port, uint_t idx, uint16_t vid)
 	 * implicitly allow tagged traffic to pass and there is
 	 * nothing to do.
 	 */
-	if (port->lp_hwghs[idx] == NULL)
+	if (idx >= port->lp_hwgh_count || port->lp_hwghs[idx] == NULL)
 		err = 0;
 	else
 		err = mac_hwgroup_addvlan(port->lp_hwghs[idx], vid);
@@ -730,14 +741,14 @@ aggr_port_remvlan(aggr_port_t *port, uint_t idx, uint16_t vid)
 	int			err;
 
 	ASSERT(MAC_PERIM_HELD(port->lp_grp->lg_mh));
-	ASSERT3U(idx, <, MAX_GROUPS_PER_PORT);
+	ASSERT3U(idx, <, port->lp_grp->lg_rx_group_count);
 	mac_perim_enter_by_mh(port->lp_mh, &pmph);
 
 	/* See comment in aggr_port_addmac(). */
-	if (port->lp_hwghs[idx] == NULL)
+	if (idx >= port->lp_hwgh_count || port->lp_hwghs[idx] == NULL)
 		idx = 0;
 
-	if (port->lp_hwghs[idx] == NULL)
+	if (idx >= port->lp_hwgh_count || port->lp_hwghs[idx] == NULL)
 		err = 0;
 	else
 		err = mac_hwgroup_remvlan(port->lp_hwghs[idx], vid);

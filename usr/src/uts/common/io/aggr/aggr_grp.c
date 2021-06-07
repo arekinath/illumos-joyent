@@ -227,6 +227,8 @@ aggr_grp_destructor(void *buf, void *arg)
 		    grp->lg_tx_ports_size * sizeof (aggr_port_t *));
 	}
 
+	kmem_free(grp->lg_rx_groups, grp->lg_rx_groups_size);
+
 	mutex_destroy(&grp->lg_lacp_lock);
 	cv_destroy(&grp->lg_lacp_cv);
 	mutex_destroy(&grp->lg_port_lock);
@@ -753,7 +755,7 @@ aggr_add_pseudo_rx_group(aggr_port_t *port, aggr_pseudo_rx_group_t *rx_grp)
 	uint_t			g_idx = rx_grp->arg_index;
 
 	ASSERT(MAC_PERIM_HELD(port->lp_grp->lg_mh));
-	ASSERT3U(g_idx, <, MAX_GROUPS_PER_PORT);
+	ASSERT3U(g_idx, <, port->lp_grp->lg_rx_group_count);
 	mac_perim_enter_by_mh(port->lp_mh, &pmph);
 
 	i = 0;
@@ -836,7 +838,7 @@ aggr_rem_pseudo_rx_group(aggr_port_t *port, aggr_pseudo_rx_group_t *rx_grp)
 	uint_t			g_idx = rx_grp->arg_index;
 
 	ASSERT(MAC_PERIM_HELD(port->lp_grp->lg_mh));
-	ASSERT3U(g_idx, <, MAX_GROUPS_PER_PORT);
+	ASSERT3U(g_idx, <, port->lp_grp->lg_rx_group_count);
 	ASSERT3P(rx_grp->arg_gh, !=, NULL);
 	mac_perim_enter_by_mh(port->lp_mh, &pmph);
 
@@ -1491,8 +1493,6 @@ aggr_grp_create(datalink_id_t linkid, uint32_t key, uint_t nports,
 	grp->lg_tx_blocked_rings = kmem_zalloc((sizeof (mac_ring_handle_t *) *
 	    MAX_RINGS_PER_GROUP), KM_SLEEP);
 	grp->lg_tx_blocked_cnt = 0;
-	bzero(&grp->lg_rx_groups,
-	    sizeof (aggr_pseudo_rx_group_t) * MAX_GROUPS_PER_PORT);
 	bzero(&grp->lg_tx_group, sizeof (aggr_pseudo_tx_group_t));
 	aggr_lacp_init_grp(grp);
 
@@ -1537,16 +1537,12 @@ aggr_grp_create(datalink_id_t linkid, uint32_t key, uint_t nports,
 		    num_rgroups);
 	}
 
-	/*
-	 * There could be cases where the hardware provides more
-	 * groups than aggr can support. Make sure we never go above
-	 * the max aggr can support.
-	 */
-	grp->lg_rx_group_count = MIN(grp->lg_rx_group_count,
-	    MAX_GROUPS_PER_PORT);
+	grp->lg_rx_groups_size = sizeof (aggr_pseudo_rx_group_t) *
+	    grp->lg_rx_group_count;
+	grp->lg_rx_groups = kmem_zalloc(grp->lg_rx_groups_size, KM_SLEEP);
 
 	ASSERT3U(grp->lg_rx_group_count, >, 0);
-	for (i = 0; i < MAX_GROUPS_PER_PORT; i++) {
+	for (i = 0; i < grp->lg_rx_group_count; i++) {
 		grp->lg_rx_groups[i].arg_index = i;
 		grp->lg_rx_groups[i].arg_untagged = 0;
 		list_create(&(grp->lg_rx_groups[i].arg_vlans),
@@ -2120,7 +2116,7 @@ aggr_grp_delete(datalink_id_t linkid, cred_t *cred)
 	VERIFY(mac_unregister(grp->lg_mh) == 0);
 	grp->lg_mh = NULL;
 
-	for (uint_t i = 0; i < MAX_GROUPS_PER_PORT; i++) {
+	for (uint_t i = 0; i < grp->lg_rx_group_count; i++) {
 		list_destroy(&(grp->lg_rx_groups[i].arg_vlans));
 	}
 

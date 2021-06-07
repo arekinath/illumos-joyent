@@ -57,8 +57,6 @@ extern "C" {
  */
 #define	MAC_PSEUDO_RING_INUSE	0x01
 
-#define	MAX_GROUPS_PER_PORT	128
-
 /*
  * VLAN filters placed on the Rx pseudo group.
  */
@@ -160,7 +158,9 @@ typedef struct aggr_port_s {
 	 * Used by aggr to program HW classification for the pseudo
 	 * groups.
 	 */
-	mac_group_handle_t	lp_hwghs[MAX_GROUPS_PER_PORT];
+	size_t				lp_hwghs_size;
+	uint_t				lp_hwgh_count;
+	mac_group_handle_t	*lp_hwghs;
 
 	uint_t			lp_tx_ring_alloc;
 	uint_t			lp_tx_ring_cnt;
@@ -255,7 +255,8 @@ typedef struct aggr_grp_s {
 	boolean_t	lg_lacp_done;
 
 	uint_t			lg_rx_group_count;
-	aggr_pseudo_rx_group_t	lg_rx_groups[MAX_GROUPS_PER_PORT];
+	size_t			lg_rx_groups_size;
+	aggr_pseudo_rx_group_t	*lg_rx_groups;
 
 	aggr_pseudo_tx_group_t	lg_tx_group;
 
