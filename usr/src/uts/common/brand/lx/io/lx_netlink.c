@@ -862,11 +862,35 @@ lx_netlink_reply_sendup(lx_netlink_reply_t *reply, mblk_t *mp, mblk_t *mp1)
 	 */
 	mp1->b_cont = mp;
 
+	/*
+	 * If the socket is currently flow-controlled, do not allow further
+	 * data to be sent out.
+	 */
+	mutex_enter(&lxsock->lxns_flowctl_mtx);
+	if (lxsock->lxns_flowctrled) {
+		mutex_exit(&lxsock->lxns_flowctl_mtx);
+		freemsg(mp1);
+		return (ENOSPC);
+	}
+
 	lxsock->lxns_upcalls->su_recv(lxsock->lxns_uphandle, mp1,
 	    msgdsize(mp1), 0, &error, NULL);
 
-	if (error != 0)
+	/*
+	 * The socket indicated that it is now flow-controlled.  That said, it
+	 * still queued the last message, so indicated success (but track the
+	 * flow-controlled state).
+	 */
+	if (error == ENOSPC) {
+		lxsock->lxns_flowctrled = B_TRUE;
 		lx_netlink_flowctrld++;
+		error = 0;
+	}
+	mutex_exit(&lxsock->lxns_flowctl_mtx);
+
+	if (error != 0) {
+		/* XXX: maybe print an error to dmesg? idk */
+	}
 }
 
 static void
@@ -884,6 +908,58 @@ lx_netlink_reply_send(lx_netlink_reply_t *reply)
 
 	lx_netlink_reply_sendup(reply, reply->lxnr_mp, mp1);
 	reply->lxnr_mp = NULL;
+}
+
+/*
+ * Reply with an NLMSG_ERROR, even if errno is 0. This is used by several
+ * audit functions where Linux libaudit refuses to correctly handle our usual
+ * multi-part replies (with NLM_F_MULTI set).
+ *
+ * lx_netlink_au_um also calls this to generate an ACK message.
+ */
+static void
+lx_netlink_reply_error(lx_netlink_reply_t *reply)
+{
+	lx_netlink_sock_t *lxsock = reply->lxnr_sock;
+	mblk_t *mp;
+	lx_netlink_hdr_t *hdr;
+	lx_netlink_err_t *err;
+
+	/*
+	 * Denote that we're done via a message with a NULL payload.
+	 */
+	lx_netlink_reply_msg(reply, NULL, 0);
+
+	if (reply->lxnr_mp != NULL) {
+		freeb(reply->lxnr_mp);
+		reply->lxnr_mp = NULL;
+	}
+
+	mp = reply->lxnr_err;
+	VERIFY(mp != NULL);
+	reply->lxnr_err = NULL;
+	err = (lx_netlink_err_t *)mp->b_rptr;
+	hdr = &err->lxne_hdr;
+	mp->b_wptr += sizeof (lx_netlink_err_t);
+
+	err->lxne_failed = reply->lxnr_hdr;
+	err->lxne_errno = reply->lxnr_errno;
+	hdr->lxnh_type = LX_NETLINK_NLMSG_ERROR;
+	hdr->lxnh_seq = reply->lxnr_hdr.lxnh_seq;
+	hdr->lxnh_len = sizeof (lx_netlink_err_t);
+	hdr->lxnh_seq = reply->lxnr_hdr.lxnh_seq;
+	hdr->lxnh_pid = lxsock->lxns_port;
+	hdr->lxnh_flags = 0;
+
+	lx_netlink_reply_sendup(reply, mp, reply->lxnr_mp1);
+
+	if (reply->lxnr_mp != NULL)
+		freeb(reply->lxnr_mp);
+
+	if (reply->lxnr_err != NULL)
+		freeb(reply->lxnr_err);
+
+	kmem_free(reply, sizeof (lx_netlink_reply_t));
 }
 
 static void
@@ -1642,7 +1718,7 @@ lx_netlink_au_set(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	if (reply == NULL)
 		return (ENOMEM);
 
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error(reply);
 	return (0);
 }
 
@@ -1676,7 +1752,7 @@ lx_netlink_au_ar(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	if (reply == NULL)
 		return (ENOMEM);
 
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error(reply);
 	return (0);
 }
 
@@ -1710,7 +1786,7 @@ lx_netlink_au_dr(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 	if (reply == NULL)
 		return (ENOMEM);
 
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error(reply);
 	return (0);
 }
 
@@ -1758,7 +1834,7 @@ lx_netlink_au_gf(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr)
 
 	lx_audit_get_feature(reply, lx_netlink_au_cb);
 	lx_netlink_reply_send(reply);
-	lx_netlink_reply_done(reply);
+	lx_netlink_reply_error(reply);
 	return (0);
 }
 
@@ -1793,7 +1869,7 @@ lx_netlink_au_um(lx_netlink_sock_t *lxsock, lx_netlink_hdr_t *hdr, mblk_t *mp)
 		if (reply == NULL)
 			return (ENOMEM);
 
-		lx_netlink_reply_done(reply);
+		lx_netlink_reply_error(reply);
 	}
 	return (0);
 }
