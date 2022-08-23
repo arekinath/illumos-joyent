@@ -83,7 +83,9 @@ SRCS =	acpi.c			\
 	xmsr.c			\
 	spinup_ap.c		\
 	iov.c			\
-	bhyve_sol_glue.c
+	bhyve_sol_glue.c	\
+	usb_dummy.c		\
+	usb_a1.c
 
 # We are not yet performing instruction emulation in userspace, so going to the
 # trouble of fixing the header tangle for this is not worth the complexity.
