@@ -2615,11 +2615,15 @@ pci_xhci_dev_intr(struct usb_hci *hci, int epctx)
 	dev = hci->hci_sc;
 	sc = dev->xsc;
 
+	pthread_mutex_lock(&sc->mtx);
+
 	/* check if device is ready; OS has to initialise it */
 	if (sc->rtsregs.erstba_p == NULL ||
 	    (sc->opregs.usbcmd & XHCI_CMD_RS) == 0 ||
-	    dev->dev_ctx == NULL)
+	    dev->dev_ctx == NULL) {
+		pthread_mutex_unlock(&sc->mtx);
 		return (0);
+	}
 
 	p = XHCI_PORTREG_PTR(sc, hci->hci_port);
 
@@ -2627,8 +2631,10 @@ pci_xhci_dev_intr(struct usb_hci *hci, int epctx)
 	if (XHCI_PS_PLS_GET(p->portsc) == 3) {
 		p->portsc &= ~XHCI_PS_PLS_MASK;
 		p->portsc |= XHCI_PS_PLS_SET(UPS_PORT_LS_RESUME);
-		if ((p->portsc & XHCI_PS_PLC) != 0)
+		if ((p->portsc & XHCI_PS_PLC) != 0) {
+			pthread_mutex_unlock(&sc->mtx);
 			return (0);
+		}
 
 		p->portsc |= XHCI_PS_PLC;
 
@@ -2644,6 +2650,7 @@ pci_xhci_dev_intr(struct usb_hci *hci, int epctx)
 	if ((ep_ctx->dwEpCtx0 & 0x7) == XHCI_ST_EPCTX_DISABLED) {
 		DPRINTF(("xhci device interrupt on disabled endpoint %d",
 		         epid));
+		pthread_mutex_unlock(&sc->mtx);
 		return (0);
 	}
 
@@ -2652,6 +2659,7 @@ pci_xhci_dev_intr(struct usb_hci *hci, int epctx)
 	pci_xhci_device_doorbell(sc, hci->hci_port, epid, 0);
 
 done:
+	pthread_mutex_unlock(&sc->mtx);
 	return (error);
 }
 
@@ -2719,7 +2727,7 @@ pci_xhci_parse_devices(struct pci_xhci_softc *sc, nvlist_t *nvl)
 {
 	struct pci_xhci_dev_emu	*dev;
 	struct usb_devemu	*ue;
-	const nvlist_t *slots_nvl, *slot_nvl;
+	nvlist_t *slots_nvl, *slot_nvl;
 	const char *name, *device;
 	char	*cp;
 	void	*devsc, *cookie;
@@ -2815,7 +2823,7 @@ pci_xhci_parse_devices(struct pci_xhci_softc *sc, nvlist_t *nvl)
 		XHCI_DEVINST_PTR(sc, dev->hci.hci_port) = dev;
 
 		dev->hci.hci_address = 0;
-		devsc = ue->ue_init(&dev->hci, nvl);
+		devsc = ue->ue_init(&dev->hci, slot_nvl);
 		if (devsc == NULL) {
 			goto bad;
 		}

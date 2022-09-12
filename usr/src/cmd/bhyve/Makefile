@@ -85,7 +85,8 @@ SRCS =	acpi.c			\
 	iov.c			\
 	bhyve_sol_glue.c	\
 	usb_dummy.c		\
-	usb_a1.c
+	usb_a1.c		\
+	usb_relay.c
 
 # We are not yet performing instruction emulation in userspace, so going to the
 # trouble of fixing the header tangle for this is not worth the complexity.

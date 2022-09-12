@@ -64,14 +64,14 @@ struct a1_config_desc {
 #define	MSETW(ptr, val)	ptr = { (uint8_t)(val), (uint8_t)((val) >> 8) }
 
 #define	dprintf(fmt, arg...)	do { \
-    time_t t; \
-    struct tm dtm; \
-    time(&t); \
-    localtime_r(&t, &dtm); \
-    EPRINTLN("[%04d-%02d-%02d %02d:%02d:%02d] a1_usb: " fmt, \
-    	dtm.tm_year + 1900, dtm.tm_mon + 1, dtm.tm_mday, dtm.tm_hour, \
-    	dtm.tm_min, dtm.tm_sec, ##arg); \
-    } while (0)
+	time_t t; \
+	struct tm dtm; \
+	time(&t); \
+	localtime_r(&t, &dtm); \
+	EPRINTLN("[%04d-%02d-%02d %02d:%02d:%02d] a1_usb: " fmt, \
+	    dtm.tm_year + 1900, dtm.tm_mon + 1, dtm.tm_mday, dtm.tm_hour, \
+	    dtm.tm_min, dtm.tm_sec, ##arg); \
+	} while (0)
 
 static struct usb_device_descriptor a1_dev_desc = {
 	.bLength = sizeof(a1_dev_desc),
