@@ -34,9 +34,9 @@
 	struct tm dtm; \
 	time(&t); \
 	localtime_r(&t, &dtm); \
-	EPRINTLN("[%04d-%02d-%02d %02d:%02d:%02d] urelay: " fmt, \
+	EPRINTLN("[%04d-%02d-%02d %02d:%02d:%02d] urelay: %s: " fmt, \
 	    dtm.tm_year + 1900, dtm.tm_mon + 1, dtm.tm_mday, dtm.tm_hour, \
-	    dtm.tm_min, dtm.tm_sec, ##arg); \
+	    dtm.tm_min, dtm.tm_sec, __func__, ##arg); \
 	} while (0)
 
 enum urelay_msg_type {
@@ -276,13 +276,19 @@ ioreq_from_buf(void *buf, size_t len, struct urelay_io_req **preq)
 
 static int
 ioreq_new(enum urelay_msg_type type, struct urelay_io_req **preq,
-    struct urelay_msg_hdr **phdr, void **pbody, const void *idata, size_t dlen)
+    struct urelay_msg_hdr **phdr, void **pbody, const struct iovec *iovs,
+    size_t iovcnt)
 {
 	int rc;
 	struct urelay_io_req *req;
 	struct urelay_msg_hdr *hdr;
 	void *body, *data;
-	size_t len;
+	size_t len, dlen, off;
+	uint i;
+
+	dlen = 0;
+	for (i = 0; i < iovcnt; ++i)
+		dlen += iovs[i].iov_len;
 
 	rc = msg_new(type, &len, &hdr, &body, &data, dlen);
 	if (rc != 0)
@@ -303,8 +309,11 @@ ioreq_new(enum urelay_msg_type type, struct urelay_io_req **preq,
 	req->uir_data = hdr;
 	req->uir_len = len;
 
-	if (idata != NULL)
-		bcopy(idata, data, dlen);
+	off = 0;
+	for (i = 0; i < iovcnt; ++i) {
+		bcopy(iovs[i].iov_base, data + off, iovs[i].iov_len);
+		off += iovs[i].iov_len;
+	}
 
 	*preq = req;
 	*phdr = hdr;
@@ -711,8 +720,6 @@ urelay_io_thread(void *arg)
 
 		while (1) {
 			while ((req = ioreq_take(sc)) != NULL) {
-				dprintf("sending %u", our_seq);
-
 				hdr = (struct urelay_msg_hdr *)req->uir_data;
 				hdr->ur_seq = to_be32(our_seq++);
 
@@ -761,11 +768,9 @@ urelay_io_thread(void *arg)
 
 			/* This is a wakeup for the outgoing queue. */
 			if (ev.portev_source == PORT_SOURCE_USER) {
-				dprintf("woke due to user event");
 				continue;
 			}
 
-			dprintf("reading control socket");
 			/* Otherwise we've got data waiting on the socket. */
 			done = read(sock, &ihdr, sizeof (ihdr));
 			if (done < 0) {
@@ -803,10 +808,6 @@ urelay_io_thread(void *arg)
 				req->uir_len = len;
 
 				hdr = req->uir_data;
-
-				dprintf("receiving %u (len = %zu)",
-				    (uint)from_be32(ihdr.ur_seq),
-				    len);
 			}
 			bcopy(&ihdr, hdr, sizeof (*hdr));
 
@@ -952,9 +953,6 @@ urelay_request(void *scarg, struct usb_data_xfer *xfer)
 	if (!xfer->ureq)
 		return (err);
 
-	dprintf("urelay_request: req = 0x%02x, req_type = 0x%02x",
-	    xfer->ureq->bRequest, xfer->ureq->bmRequestType);
-
 	rc = ioreq_new(URELAY_CTRL, &req, &hdr, (void **)&ctrl, NULL, 0);
 	if (rc) {
 		dprintf("ioreq_new failed: %d: %s", rc, strerror(rc));
@@ -1000,8 +998,6 @@ urelay_request(void *scarg, struct usb_data_xfer *xfer)
 	}
 
 	err = from_be32(resp->umcr_rc);
-	dprintf("urelay_request: err = %d, bdone = %d", err,
-	    (data != NULL) ? data->bdone : 0);
 
 out:
 	ioreq_free(req);
@@ -1015,24 +1011,31 @@ urelay_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 	struct urelay_softc *sc = scarg;
 	int err;
 	struct usb_data_xfer_block *data;
-	uint8_t *udata;
 	uint idx, i;
 	int rc;
 	size_t len, iolen;
+	size_t bdone, blen;
 	struct urelay_io_req *req;
 	struct urelay_msg_hdr *hdr;
 	struct urelay_msg_data_resp *resp;
 	struct urelay_msg_data *dreq;
+	struct iovec iovs[USB_MAX_XFER_BLOCKS];
+	size_t iovcnt = 0;
+	u_char *udata;
 
 	err = USB_ERR_NORMAL_COMPLETION;
 
 	data = NULL;
-	udata = NULL;
 	idx = xfer->head;
+	len = 0;
 	for (i = 0; i < xfer->ndata; i++) {
 		data = &xfer->data[idx];
 		if (data->buf != NULL && data->blen != 0) {
-			break;
+			len += data->blen;
+			iovs[iovcnt++] = (struct iovec){
+			    .iov_len = data->blen,
+			    .iov_base = data->buf
+			};
 		} else {
 			data->processed = 1;
 			data = NULL;
@@ -1040,22 +1043,17 @@ urelay_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
 	}
 
-	if (data == NULL)
+	if (iovcnt == 0)
 		return (err);
-
-	udata = data->buf;
-	len = data->blen;
-
-	dprintf("urelay_data_handler: dir = %d, epctx = %d, len = %zu", dir,
-	    epctx, len);
 
 	iolen = 0;
 	if (dir == USB_XFER_OUT)
-		iolen = len;
+		iolen = iovcnt;
 
-	rc = ioreq_new(URELAY_DATA, &req, &hdr, (void **)&dreq, udata, iolen);
+	rc = ioreq_new(URELAY_DATA, &req, &hdr, (void **)&dreq, iovs, iolen);
 	if (rc) {
 		dprintf("ioreq_new failed: %d: %s", rc, strerror(rc));
+		err = USB_ERR_IOERROR;
 		return (err);
 	}
 
@@ -1073,6 +1071,7 @@ urelay_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 	rc = ioreq_enqueue(sc, req);
 	if (rc) {
 		dprintf("ioreq_enqueue failed: %d: %s", rc, strerror(rc));
+		err = USB_ERR_IOERROR;
 		goto out;
 	}
 
@@ -1083,25 +1082,54 @@ urelay_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 	if (hdr->ur_msg_type != URELAY_DATA_RESP) {
 		dprintf("unexpected type %02x response to URELAY_DATA",
 		    hdr->ur_msg_type);
+		err = USB_ERR_IOERROR;
 		goto out;
 	}
 	resp = (struct urelay_msg_data_resp *)(hdr + 1);
 	if (req->uir_len < sizeof (*hdr) + sizeof (*resp)) {
 		dprintf("short response to URELAY_DATA");
+		err = USB_ERR_IOERROR;
 		goto out;
 	}
 
-	len = req->uir_len - (sizeof (*hdr) + sizeof (*resp));
-	if (len > 0)
-		bcopy(resp + 1, udata, len);
-	dprintf("ulrelay_data_handler: %zu copied", len);
+	blen = from_be32(resp->umdr_blen);
+	bdone = from_be32(resp->umdr_bdone);
 
-	data->blen = from_be32(resp->umdr_blen);
-	data->bdone = from_be32(resp->umdr_bdone);
-	data->processed = 1;
-	USB_DATA_SET_ERRCODE(data, resp->umdr_errcode);
+	len = req->uir_len - (sizeof (*hdr) + sizeof (*resp));
+	if (dir == USB_XFER_IN && len < bdone) {
+		dprintf("data (%zu bytes) shorter than bdone (%zu bytes)",
+		    len, bdone);
+		err = USB_ERR_IOERROR;
+		goto out;
+	}
+
+	data = NULL;
+	udata = (u_char *)(resp + 1);
+	idx = xfer->head;
+	for (i = 0; i < xfer->ndata; i++) {
+		data = &xfer->data[idx];
+		if (data->buf != NULL && data->blen != 0) {
+			size_t take = data->blen;
+			if (take > bdone)
+				take = bdone;
+			if (dir == USB_XFER_IN && take > 0) {
+				bcopy(udata, data->buf, take);
+				udata += take;
+			}
+			data->blen -= take;
+			data->bdone += take;
+			data->processed = 1;
+			USB_DATA_SET_ERRCODE(data, resp->umdr_errcode);
+
+			blen -= data->blen;
+			bdone -= take;
+		}
+		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
+	}
+	VERIFY3U(bdone, ==, 0);
+	VERIFY3U(blen, ==, 0);
+
 	err = from_be32(resp->umdr_rc);
-	dprintf("urelay_data_handler: err = %d, bdone = %d", err, data->bdone);
 
 out:
 	ioreq_free(req);
@@ -1129,11 +1157,7 @@ urelay_reset(void *scarg)
 		return (0);
 	}
 
-	dprintf("enqueue reset req");
-
 	ioreq_wait(req);
-
-	dprintf("got response to reset req");
 
 	hdr = req->uir_data;
 	assert(req->uir_len >= sizeof (*hdr));
