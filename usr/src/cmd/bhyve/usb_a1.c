@@ -1046,7 +1046,7 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 				    cmd->ac_slot);
 				USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
 				    USB_NAK);
-				err = USB_ERR_CANCELLED;
+				err = USB_ERR_STALLED;
 				pthread_mutex_unlock(&sc->as_mtx);
 				goto done;
 			}
@@ -1056,7 +1056,7 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 				    cmd->ac_slot);
 				USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
 				    USB_NAK);
-				err = USB_ERR_CANCELLED;
+				err = USB_ERR_STALLED;
 				pthread_mutex_unlock(&sc->as_mtx);
 				goto done;
 			}
@@ -1080,7 +1080,7 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		if (slot->asl_state != SLOT_BUFFERING) {
 			dprintf("slot state mismatch");
 			USB_DATA_SET_ERRCODE(data, USB_NAK);
-			err = USB_ERR_CANCELLED;
+			err = USB_ERR_STALLED;
 			pthread_mutex_unlock(&sc->as_mtx);
 			goto done;
 		}
@@ -1110,7 +1110,7 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		if (cqe == NULL) {
 			dprintf("read from bulk in with no completion");
 			USB_DATA_SET_ERRCODE(&xfer->data[xfer->head], USB_NAK);
-			err = USB_ERR_CANCELLED;
+			err = USB_ERR_STALLED;
 			pthread_mutex_unlock(&sc->as_mtx);
 			goto done;
 		}
@@ -1118,7 +1118,9 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		if (slot->asl_write == 0) {
 			dprintf("read completion hdr on slot %u", slot->asl_idx);
 			if (len < sizeof (struct a1_completion)) {
-				err = USB_ERR_SHORT_XFER;
+				USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
+				    USB_NAK);
+				err = USB_ERR_STALLED;
 				pthread_mutex_unlock(&sc->as_mtx);
 				goto done;
 			}
@@ -1138,6 +1140,12 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		data->bdone += len;
 		data->blen -= len;
 		slot->asl_write += len;
+
+		if (data->blen > 0) {
+			USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
+			    USB_SHORT);
+			err = USB_ERR_SHORT_XFER;
+		}
 
 		if (slen - len == 0) {
 			dprintf("finished reading completion on slot %u", slot->asl_idx);
@@ -1181,6 +1189,8 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		data->processed = 1;
 		data->bdone += len;
 		data->blen -= len;
+		if (data->blen > 0)
+			err = USB_ERR_SHORT_XFER;
 		sc->as_intr_dirty = 0;
 		pthread_mutex_unlock(&sc->as_mtx);
 
