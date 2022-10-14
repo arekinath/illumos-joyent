@@ -1127,6 +1127,7 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 			bcopy(&slot->asl_rhdr, udata, sizeof (slot->asl_rhdr));
 			data->processed = 1;
 			data->bdone += sizeof (slot->asl_rhdr);
+			udata += sizeof (slot->asl_rhdr);
 			data->blen -= sizeof (slot->asl_rhdr);
 			len -= sizeof (slot->asl_rhdr);
 			slot->asl_write += sizeof (slot->asl_rhdr);
