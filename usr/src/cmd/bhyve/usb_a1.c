@@ -986,44 +986,90 @@ rot13(uint8_t *buf, size_t len)
 	}
 }
 
-static int
-a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
-     int epctx)
+static size_t
+xfer_resid(struct usb_data_xfer *xfer)
 {
-	struct a1_softc *sc = scarg;
 	struct usb_data_xfer_block *data;
-	int err;
-	char *udata;
-	uint i, idx;
-	size_t len, slen;
-	struct a1_slot *slot;
-	struct a1_command *cmd;
-	struct a1_cq_ent *cqe;
-
-	(void)sc;
-
-	udata = NULL;
-	err = USB_ERR_NORMAL_COMPLETION;
-
-	data = NULL;
+	size_t resid = 0;
+	uint idx, i;
 	idx = xfer->head;
-	for (i = 0; i < xfer->ndata; i++) {
+	for (i = 0; i < xfer->ndata; ++i) {
 		data = &xfer->data[idx];
 		if (data->buf != NULL && data->blen != 0) {
-			break;
+			resid += data->blen;
 		} else {
 			data->processed = 1;
 			data = NULL;
 		}
 		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
 	}
-	if (data == NULL)
-		goto done;
+	return (resid);
+}
 
-	udata = data->buf;
-	len = data->blen;
+static int
+xfer_move(struct usb_data_xfer *xfer, int dir, void *buf, size_t len)
+{
+	struct usb_data_xfer_block *data;
+	uint idx, i;
+	u_char *udata;
+	idx = xfer->head;
+	for (i = 0; i < xfer->ndata; ++i) {
+		data = &xfer->data[idx];
+		if (data->buf != NULL && data->blen != 0) {
+			size_t take = data->blen;
+			if (take > len)
+				take = len;
+			udata = data->buf;
+			if (dir == USB_XFER_IN && take > 0) {
+				bcopy(buf, &udata[data->bdone], take);
+				buf += take;
+			} else if (dir == USB_XFER_OUT && take > 0) {
+				bcopy(&udata[data->bdone], buf, take);
+				buf += take;
+			}
+			data->blen -= take;
+			data->bdone += take;
+			data->processed = 1;
+			len -= take;
+		}
+		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
+	}
+	if (len > 0)
+		return (E2BIG);
+	return (0);
+}
 
-	if (udata == NULL) {
+static void
+xfer_set_err(struct usb_data_xfer *xfer, int ecode)
+{
+	struct usb_data_xfer_block *data;
+	uint idx, i;
+	idx = xfer->head;
+	for (i = 0; i < xfer->ndata; ++i) {
+		data = &xfer->data[idx];
+		if (data->buf != NULL) {
+			data->processed = 1;
+			USB_DATA_SET_ERRCODE(data, ecode);
+		}
+		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
+	}
+}
+
+static int
+a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
+     int epctx)
+{
+	struct a1_softc *sc = scarg;
+	int err, rc;
+	size_t len, slen;
+	struct a1_slot *slot;
+	struct a1_command cmd;
+	struct a1_cq_ent *cqe;
+
+	err = USB_ERR_NORMAL_COMPLETION;
+
+	len = xfer_resid(xfer);
+	if (len == 0) {
 		err = USB_ERR_NOMEM;
 		goto done;
 	}
@@ -1034,52 +1080,50 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		pthread_mutex_lock(&sc->as_mtx);
 		/* Is this the start of a new command? */
 		if (sc->as_bslot == NULL) {
-			if (len < sizeof (struct a1_command)) {
-				dprintf("short xfer");
-				err = USB_ERR_SHORT_XFER;
-				pthread_mutex_unlock(&sc->as_mtx);
-				goto done;
-			}
-			cmd = (struct a1_command *)udata;
-			if (cmd->ac_slot >= sc->as_slots) {
-				dprintf("slot # too high (%u)",
-				    cmd->ac_slot);
-				USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
-				    USB_NAK);
+			rc = xfer_move(xfer, dir, &cmd, sizeof (cmd));
+			if (rc) {
+				dprintf("xfer not long enough for hdr");
+				xfer_set_err(xfer, USB_STALL);
 				err = USB_ERR_STALLED;
 				pthread_mutex_unlock(&sc->as_mtx);
 				goto done;
 			}
-			slot = &sc->as_slot[cmd->ac_slot];
+			if (cmd.ac_slot >= sc->as_slots) {
+				dprintf("slot # too high (%u)",
+				    cmd.ac_slot);
+				xfer_set_err(xfer, USB_STALL);
+				err = USB_ERR_STALLED;
+				pthread_mutex_unlock(&sc->as_mtx);
+				goto done;
+			}
+			slot = &sc->as_slot[cmd.ac_slot];
 			if (slot->asl_state != SLOT_EMPTY) {
 				dprintf("slot already busy (%u)",
-				    cmd->ac_slot);
-				USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
-				    USB_NAK);
+				    cmd.ac_slot);
+				xfer_set_err(xfer, USB_STALL);
 				err = USB_ERR_STALLED;
 				pthread_mutex_unlock(&sc->as_mtx);
 				goto done;
 			}
 			slot->asl_state = SLOT_BUFFERING;
 			sc->as_bslot = slot;
-			slen = le16toh(cmd->ac_length);
+			slen = le16toh(cmd.ac_length);
 			if (slot->asl_bufsize < slen) {
 				slot->asl_bufsize = slen;
 				free(slot->asl_buf);
 				slot->asl_buf = malloc(slen);
 			}
 			slot->asl_len = slen;
-			bcopy(udata, &slot->asl_chdr, sizeof (struct a1_command));
-			udata += sizeof (struct a1_command);
-			len -= sizeof (struct a1_command);
+			bcopy(&cmd, &slot->asl_chdr, sizeof (cmd));
+			len -= sizeof (cmd);
 			dprintf("new cmd on slot %u: op = %u, length = %u",
-			    slot->asl_idx, cmd->ac_operation, slen);
+			    slot->asl_idx, cmd.ac_operation, slen);
 		} else {
 			slot = sc->as_bslot;
 		}
 		if (slot->asl_state != SLOT_BUFFERING) {
 			dprintf("slot state mismatch");
-			USB_DATA_SET_ERRCODE(data, USB_NAK);
+			xfer_set_err(xfer, USB_STALL);
 			err = USB_ERR_STALLED;
 			pthread_mutex_unlock(&sc->as_mtx);
 			goto done;
@@ -1087,10 +1131,9 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		slen = slot->asl_len - slot->asl_read;
 		if (len >= slen)
 			len = slen;
-		data->processed = 1;
-		data->bdone = len;
-		data->blen = 0;
-		bcopy(udata, &slot->asl_buf[slot->asl_read], len);
+		rc = xfer_move(xfer, dir, &slot->asl_buf[slot->asl_read],
+		    len);
+		ASSERT3U(rc, ==, 0);
 		slot->asl_read += len;
 		dprintf("slot %u: read %zu out of %zu", slot->asl_idx,
 		    slot->asl_read, slot->asl_len);
@@ -1109,7 +1152,7 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		cqe = sc->as_cq;
 		if (cqe == NULL) {
 			dprintf("read from bulk in with no completion");
-			USB_DATA_SET_ERRCODE(&xfer->data[xfer->head], USB_NAK);
+			xfer_set_err(xfer, USB_STALL);
 			err = USB_ERR_STALLED;
 			pthread_mutex_unlock(&sc->as_mtx);
 			goto done;
@@ -1117,18 +1160,14 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		slot = cqe->cq_slot;
 		if (slot->asl_write == 0) {
 			dprintf("read completion hdr on slot %u", slot->asl_idx);
-			if (len < sizeof (struct a1_completion)) {
-				USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
-				    USB_NAK);
+			rc = xfer_move(xfer, dir, &slot->asl_rhdr,
+			    sizeof (slot->asl_rhdr));
+			if (rc) {
+				xfer_set_err(xfer, USB_STALL);
 				err = USB_ERR_STALLED;
 				pthread_mutex_unlock(&sc->as_mtx);
 				goto done;
 			}
-			bcopy(&slot->asl_rhdr, udata, sizeof (slot->asl_rhdr));
-			data->processed = 1;
-			data->bdone += sizeof (slot->asl_rhdr);
-			udata += sizeof (slot->asl_rhdr);
-			data->blen -= sizeof (slot->asl_rhdr);
 			len -= sizeof (slot->asl_rhdr);
 			slot->asl_write += sizeof (slot->asl_rhdr);
 		}
@@ -1136,15 +1175,14 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		    slot->asl_write;
 		if (len > slen)
 			len = slen;
-		bcopy(slot->asl_buf, udata, len);
-		data->processed = 1;
-		data->bdone += len;
-		data->blen -= len;
+		rc = xfer_move(xfer, dir,
+		    &slot->asl_buf[slot->asl_write - sizeof (slot->asl_rhdr)],
+		    len);
+		VERIFY3U(rc, ==, 0);
 		slot->asl_write += len;
 
-		if (data->blen > 0) {
-			USB_DATA_SET_ERRCODE(&xfer->data[xfer->head],
-			    USB_SHORT);
+		if (xfer_resid(xfer) > 0) {
+			xfer_set_err(xfer, USB_SHORT);
 			err = USB_ERR_SHORT_XFER;
 		}
 
@@ -1174,29 +1212,27 @@ a1_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		pthread_mutex_lock(&sc->as_mtx);
 		if (!sc->as_intr_dirty) {
 			dprintf("no interrupt waiting, NAK");
-			USB_DATA_SET_ERRCODE(&xfer->data[xfer->head], USB_NAK);
+			xfer_set_err(xfer, USB_NAK);
 			err = USB_ERR_CANCELLED;
 			pthread_mutex_unlock(&sc->as_mtx);
 			goto done;
 		}
-		if (len > sizeof (sc->as_intr))
-			len = sizeof (sc->as_intr);
-		if (len < sizeof (sc->as_intr)) {
-			err = USB_ERR_SHORT_XFER;
-			pthread_mutex_unlock(&sc->as_mtx);
+		rc = xfer_move(xfer, dir, &sc->as_intr, sizeof (sc->as_intr));
+		if (rc) {
+			dprintf("intr xfer not long enough for hdr");
+			xfer_set_err(xfer, USB_STALL);
+			err = USB_ERR_STALLED;
 			goto done;
 		}
-		bcopy((const void *)&sc->as_intr, udata, len);
-		data->processed = 1;
-		data->bdone += len;
-		data->blen -= len;
-		if (data->blen > 0)
+		if (xfer_resid(xfer) > 0) {
+			xfer_set_err(xfer, USB_SHORT);
 			err = USB_ERR_SHORT_XFER;
+		}
 		sc->as_intr_dirty = 0;
 		pthread_mutex_unlock(&sc->as_mtx);
 
 	} else {
-		USB_DATA_SET_ERRCODE(data, USB_STALL);
+		xfer_set_err(xfer, USB_STALL);
 		err = USB_ERR_STALLED;
 	}
 
