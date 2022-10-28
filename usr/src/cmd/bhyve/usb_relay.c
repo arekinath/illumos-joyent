@@ -290,9 +290,17 @@ ioreq_new(enum urelay_msg_type type, struct urelay_io_req **preq,
 	for (i = 0; i < iovcnt; ++i)
 		dlen += iovs[i].iov_len;
 
+	if (dlen > UINT16_MAX)
+		return (ENOSPC);
+
 	rc = msg_new(type, &len, &hdr, &body, &data, dlen);
 	if (rc != 0)
 		return (rc);
+
+	if (len > UINT16_MAX) {
+		free(hdr);
+		return (ENOSPC);
+	}
 
 	req = calloc(1, sizeof (*req));
 	if (req == NULL) {
