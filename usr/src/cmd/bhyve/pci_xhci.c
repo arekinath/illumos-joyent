@@ -1548,7 +1548,7 @@ pci_xhci_xfer_complete(struct pci_xhci_softc *sc, struct usb_data_xfer *xfer,
 	struct xhci_trb		evtrb;
 	uint32_t trbflags;
 	uint32_t edtla;
-	int i, err;
+	int i, err, didshort;
 
 	dev = XHCI_SLOTDEV_PTR(sc, slot);
 	devep = &dev->eps[epid];
@@ -1561,6 +1561,7 @@ pci_xhci_xfer_complete(struct pci_xhci_softc *sc, struct usb_data_xfer *xfer,
 	err = XHCI_TRB_ERROR_SUCCESS;
 	*do_intr = 0;
 	edtla = 0;
+	didshort = 0;
 
 	/* go through list of TRBs and insert event(s) */
 	for (i = xfer->head; xfer->ndata > 0; ) {
@@ -1580,6 +1581,23 @@ pci_xhci_xfer_complete(struct pci_xhci_softc *sc, struct usb_data_xfer *xfer,
 			break;
 		}
 
+		/* use the errcode from the head */
+		switch (USB_DATA_GET_ERRCODE(&xfer->data[xfer->head])) {
+		case USB_SHORT:
+			/* Error on the first short TRB */
+			if (xfer->data[i].blen > 0 && !didshort) {
+				err = XHCI_TRB_ERROR_SHORT_PKT;
+				didshort = 1;
+			}
+			break;
+		case USB_ERR:
+			err = XHCI_TRB_ERROR_UNDEFINED;
+			break;
+		case USB_STALL:
+			err = XHCI_TRB_ERROR_STALL;
+			break;
+		}
+
 		xfer->ndata--;
 		edtla += xfer->data[i].bdone;
 
@@ -1589,7 +1607,7 @@ pci_xhci_xfer_complete(struct pci_xhci_softc *sc, struct usb_data_xfer *xfer,
 		    xfer->data[i].streamid, xfer->data[i].trbnext,
 		    xfer->data[i].ccs);
 
-		/* Only interrupt if IOC or short packet */
+		/* Only interrupt if IOC or first short packet */
 		if (!(trb->dwTrb3 & XHCI_TRB_3_IOC_BIT) &&
 		    !((err == XHCI_TRB_ERROR_SHORT_PKT) &&
 		      (trb->dwTrb3 & XHCI_TRB_3_ISP_BIT))) {
