@@ -2252,15 +2252,16 @@ typedef struct {
 } mlxcx_reg_paos_t;
 
 typedef enum {
+	MLXCX_PROTO_NONE			= 0,
 	MLXCX_PROTO_SGMII			= 1 << 0,
 	MLXCX_PROTO_1000BASE_KX			= 1 << 1,
 	MLXCX_PROTO_10GBASE_CX4			= 1 << 2,
 	MLXCX_PROTO_10GBASE_KX4			= 1 << 3,
 	MLXCX_PROTO_10GBASE_KR			= 1 << 4,
-	MLXCX_PROTO_UNKNOWN_1			= 1 << 5,
+	MLXCX_PROTO_20GBASE_KR2			= 1 << 5,
 	MLXCX_PROTO_40GBASE_CR4			= 1 << 6,
 	MLXCX_PROTO_40GBASE_KR4			= 1 << 7,
-	MLXCX_PROTO_UNKNOWN_2			= 1 << 8,
+	MLXCX_PROTO_56GBASE_R4			= 1 << 8,
 	MLXCX_PROTO_SGMII_100BASE		= 1 << 9,
 	MLXCX_PROTO_UNKNOWN_3			= 1 << 10,
 	MLXCX_PROTO_UNKNOWN_4			= 1 << 11,
@@ -2271,42 +2272,191 @@ typedef enum {
 	MLXCX_PROTO_40GBASE_LR4_ER4		= 1 << 16,
 	MLXCX_PROTO_UNKNOWN_5			= 1 << 17,
 	MLXCX_PROTO_50GBASE_SR2			= 1 << 18,
-	MLXCX_PROTO_UNKNOWN_6			= 1 << 19,
+	MLXCX_PROTO_50GBASE_KR4			= 1 << 19,
 	MLXCX_PROTO_100GBASE_CR4		= 1 << 20,
 	MLXCX_PROTO_100GBASE_SR4		= 1 << 21,
 	MLXCX_PROTO_100GBASE_KR4		= 1 << 22,
-	MLXCX_PROTO_UNKNOWN_7			= 1 << 23,
-	MLXCX_PROTO_UNKNOWN_8			= 1 << 24,
-	MLXCX_PROTO_UNKNOWN_9			= 1 << 25,
-	MLXCX_PROTO_UNKNOWN_10			= 1 << 26,
+	MLXCX_PROTO_100GBASE_LR4		= 1 << 23,
+	MLXCX_PROTO_100BASE_T			= 1 << 24,
+	MLXCX_PROTO_1000BASE_T			= 1 << 25,
+	MLXCX_PROTO_10GBASE_T			= 1 << 26,
 	MLXCX_PROTO_25GBASE_CR			= 1 << 27,
 	MLXCX_PROTO_25GBASE_KR			= 1 << 28,
 	MLXCX_PROTO_25GBASE_SR			= 1 << 29,
 	MLXCX_PROTO_50GBASE_CR2			= 1 << 30,
-	MLXCX_PROTO_50GBASE_KR2			= 1UL << 31,
+	MLXCX_PROTO_50GBASE_KR2			= 1UL << 31
+} mlxcx_base_eth_proto_t;
+
+typedef enum {
+	MLXCX_EXTPROTO_NONE				= 0,
+	MLXCX_EXTPROTO_SGMII_100M			= 1 << 0,
+	MLXCX_EXTPROTO_1000BASE_X_SGMII			= 1 << 1,
+	MLXCX_EXTPROTO_UNKNOWN_1			= 1 << 2,
+	MLXCX_EXTPROTO_5GBASE_R				= 1 << 3,
+	MLXCX_EXTPROTO_10GBASE_XFI_XAUI_1		= 1 << 4,
+	MLXCX_EXTPROTO_40GBASE_XLAUI_4_XLPPI_4		= 1 << 5,
+	MLXCX_EXTPROTO_25GAUI_1_25GBASE_CR_KR		= 1 << 6,
+	MLXCX_EXTPROTO_50GAUI_2_LAUI_2_50GBASE_CR2_KR2	= 1 << 7,
+	MLXCX_EXTPROTO_50GAUI_1_LAUI_1_50GBASE_CR_KR	= 1 << 8,
+	MLXCX_EXTPROTO_CAUI_4_100GBASE_CR4_KR4		= 1 << 9,
+	MLXCX_EXTPROTO_100GAUI_2_100GBASE_CR2_KR2	= 1 << 10,
+	MLXCX_EXTPROTO_100GAUI_1_100GBASE_CR_KR		= 1 << 11,
+	MLXCX_EXTPROTO_200GAUI_4_200GBASE_CR4_KR4	= 1 << 12,
+	MLXCX_EXTPROTO_200GAUI_2_200GBASE_CR2_KR2	= 1 << 13,
+	MLXCX_EXTPROTO_UNKNOWN_2			= 1 << 14,
+	MLXCX_EXTPROTO_400GAUI_8			= 1 << 15,
+	MLXCX_EXTPROTO_400GAUI_4_400GBASE_CR4_KR4	= 1 << 16
+} mlxcx_ext_eth_proto_t;
+
+typedef struct {
+	bits32_t	mep_base;
+	bits32_t	mep_ext;
 } mlxcx_eth_proto_t;
 
-#define	MLXCX_PROTO_100M	MLXCX_PROTO_SGMII_100BASE
+typedef enum {
+	MLXCX_SPEED_UNKNOWN,
+	MLXCX_SPEED_100M,
+	MLXCX_SPEED_1G,
+	MLXCX_SPEED_5G,
+	MLXCX_SPEED_10G,
+	MLXCX_SPEED_25G,
+	MLXCX_SPEED_40G,
+	MLXCX_SPEED_50G,
+	MLXCX_SPEED_100G,
+	MLXCX_SPEED_200G,
+	MLXCX_SPEED_400G
+} mlxcx_eth_speed_t;
 
-#define	MLXCX_PROTO_1G		(MLXCX_PROTO_1000BASE_KX | MLXCX_PROTO_SGMII)
+static inline mlxcx_base_eth_proto_t
+mlxcx_eth_speed_to_base_mask(mlxcx_eth_speed_t spd)
+{
+	switch (spd) {
+	case MLXCX_SPEED_UNKNOWN:
+		return (MLXCX_PROTO_NONE);
+	case MLXCX_SPEED_100M:
+		return (MLXCX_PROTO_SGMII_100BASE | MLXCX_PROTO_100BASE_T);
+	case MLXCX_SPEED_1G:
+		return (MLXCX_PROTO_1000BASE_KX | MLXCX_PROTO_1000BASE_T |
+		    MLXCX_PROTO_SGMII);
+	case MLXCX_SPEED_5G:
+		return (MLXCX_PROTO_NONE);
+	case MLXCX_SPEED_10G:
+		return (MLXCX_PROTO_10GBASE_CX4 | MLXCX_PROTO_10GBASE_KX4 |
+		    MLXCX_PROTO_10GBASE_KR | MLXCX_PROTO_10GBASE_CR |
+		    MLXCX_PROTO_10GBASE_SR | MLXCX_PROTO_10GBASE_ER_LR |
+		    MLXCX_PROTO_10GBASE_T);
+	case MLXCX_SPEED_25G:
+		return (MLXCX_PROTO_25GBASE_CR | MLXCX_PROTO_25GBASE_KR |
+		    MLXCX_PROTO_25GBASE_SR);
+	case MLXCX_SPEED_40G:
+		return (MLXCX_PROTO_40GBASE_SR4 | MLXCX_PROTO_40GBASE_LR4_ER4 |
+		    MLXCX_PROTO_40GBASE_CR4 | MLXCX_PROTO_40GBASE_KR4);
+	case MLXCX_SPEED_50G:
+		return (MLXCX_PROTO_50GBASE_CR2 | MLXCX_PROTO_50GBASE_KR2 |
+		    MLXCX_PROTO_50GBASE_SR2 | MLXCX_PROTO_50GBASE_KR4);
+	case MLXCX_SPEED_100G:
+		return (MLXCX_PROTO_100GBASE_CR4 | MLXCX_PROTO_100GBASE_SR4 |
+		    MLXCX_PROTO_100GBASE_KR4 | MLXCX_PROTO_100GBASE_LR4);
+	case MLXCX_SPEED_200G:
+		return (MLXCX_PROTO_NONE);
+	case MLXCX_SPEED_400G:
+		return (MLXCX_PROTO_NONE);
+	}
+}
 
-#define	MLXCX_PROTO_10G		(MLXCX_PROTO_10GBASE_CX4 | \
-	MLXCX_PROTO_10GBASE_KX4 | MLXCX_PROTO_10GBASE_KR | \
-	MLXCX_PROTO_10GBASE_CR | MLXCX_PROTO_10GBASE_SR | \
-	MLXCX_PROTO_10GBASE_ER_LR)
+static inline mlxcx_ext_eth_proto_t
+mlxcx_eth_speed_to_ext_mask(mlxcx_eth_speed_t spd)
+{
+	switch (spd) {
+	case MLXCX_SPEED_UNKNOWN:
+		return (MLXCX_EXTPROTO_NONE);
+	case MLXCX_SPEED_100M:
+		return (MLXCX_EXTPROTO_SGMII_100M);
+	case MLXCX_SPEED_1G:
+		return (MLXCX_EXTPROTO_1000BASE_X_SGMII);
+	case MLXCX_SPEED_5G:
+		return (MLXCX_EXTPROTO_5GBASE_R);
+	case MLXCX_SPEED_10G:
+		return (MLXCX_EXTPROTO_10GBASE_XFI_XAUI_1);
+	case MLXCX_SPEED_25G:
+		return (MLXCX_EXTPROTO_25GAUI_1_25GBASE_CR_KR);
+	case MLXCX_SPEED_40G:
+		return (MLXCX_EXTPROTO_40GBASE_XLAUI_4_XLPPI_4);
+	case MLXCX_SPEED_50G:
+		return (MLXCX_EXTPROTO_50GAUI_2_LAUI_2_50GBASE_CR2_KR2 |
+		    MLXCX_EXTPROTO_50GAUI_1_LAUI_1_50GBASE_CR_KR);
+	case MLXCX_SPEED_100G:
+		return (MLXCX_EXTPROTO_CAUI_4_100GBASE_CR4_KR4 |
+		    MLXCX_EXTPROTO_100GAUI_2_100GBASE_CR2_KR2 |
+		    MLXCX_EXTPROTO_100GAUI_1_100GBASE_CR_KR);
+	case MLXCX_SPEED_200G:
+		return (MLXCX_EXTPROTO_200GAUI_4_200GBASE_CR4_KR4 |
+		    MLXCX_EXTPROTO_200GAUI_2_200GBASE_CR2_KR2);
+	case MLXCX_SPEED_400G:
+		return (MLXCX_EXTPROTO_400GAUI_8 |
+		    MLXCX_EXTPROTO_400GAUI_4_400GBASE_CR4_KR4);
+	}
+}
 
-#define	MLXCX_PROTO_25G		(MLXCX_PROTO_25GBASE_CR | \
-	MLXCX_PROTO_25GBASE_KR | MLXCX_PROTO_25GBASE_SR)
 
-#define	MLXCX_PROTO_40G		(MLXCX_PROTO_40GBASE_SR4 | \
-	MLXCX_PROTO_40GBASE_LR4_ER4 | MLXCX_PROTO_40GBASE_CR4 | \
-	MLXCX_PROTO_40GBASE_KR4)
+static inline void
+mlxcx_set_eth_speed(mlxcx_eth_proto_t *proto, mlxcx_eth_speed_t spd)
+{
+	set_bit32(&proto->mep_base, mlxcx_eth_speed_to_base_mask(spd));
+	set_bit32(&proto->mep_ext, mlxcx_eth_speed_to_ext_mask(spd));
+}
 
-#define	MLXCX_PROTO_50G		(MLXCX_PROTO_50GBASE_CR2 | \
-	MLXCX_PROTO_50GBASE_KR2 | MLXCX_PROTO_50GBASE_SR2)
+static inline void
+mlxcx_clear_eth_speed(mlxcx_eth_proto_t *proto, mlxcx_eth_speed_t spd)
+{
+	clear_bit32(&proto->mep_base, mlxcx_eth_speed_to_base_mask(spd));
+	clear_bit32(&proto->mep_ext, mlxcx_eth_speed_to_ext_mask(spd));
+}
 
-#define	MLXCX_PROTO_100G	(MLXCX_PROTO_100GBASE_CR4 | \
-	MLXCX_PROTO_100GBASE_SR4 | MLXCX_PROTO_100GBASE_KR4)
+static inline boolean_t
+mlxcx_test_eth_speed(const mlxcx_eth_proto_t *proto, mlxcx_eth_speed_t spd)
+{
+	mlxcx_base_eth_proto_t base;
+	mlxcx_ext_eth_proto_t ext;
+
+	base = mlxcx_eth_speed_to_base_mask(spd);
+	if (base != MLXCX_PROTO_NONE) {
+		if (get_bit32(proto->mep_base, base))
+			return (B_TRUE);
+	}
+	ext = mlxcx_eth_speed_to_ext_mask(spd);
+	if (ext != MLXCX_EXTPROTO_NONE) {
+		if (get_bit32(proto->mep_ext, ext))
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+static inline mlxcx_eth_speed_t
+mlxcx_get_eth_speed(const mlxcx_eth_proto_t *proto)
+{
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_400G))
+		return (MLXCX_SPEED_400G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_200G))
+		return (MLXCX_SPEED_200G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_100G))
+		return (MLXCX_SPEED_100G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_50G))
+		return (MLXCX_SPEED_50G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_40G))
+		return (MLXCX_SPEED_40G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_25G))
+		return (MLXCX_SPEED_25G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_10G))
+		return (MLXCX_SPEED_10G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_5G))
+		return (MLXCX_SPEED_5G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_1G))
+		return (MLXCX_SPEED_1G);
+	if (mlxcx_test_eth_speed(proto, MLXCX_SPEED_100M))
+		return (MLXCX_SPEED_100M);
+	return (MLXCX_SPEED_UNKNOWN);
+}
 
 typedef enum {
 	MLXCX_AUTONEG_DISABLE_CAP	= 1 << 5,
@@ -2328,12 +2478,11 @@ typedef struct {
 	uint8_t		mlrd_ptys_rsvd2;
 	uint16be_t	mlrd_ptys_data_rate_oper;
 
-	uint8_t		mlrd_ptys_rsvd3[4];
-
+	bits32_t	mlrd_ptys_ext_proto_cap;
 	bits32_t	mlrd_ptys_proto_cap;
-	uint8_t		mlrd_ptys_rsvd4[8];
+	bits32_t	mlrd_ptys_ext_proto_admin;
 	bits32_t	mlrd_ptys_proto_admin;
-	uint8_t		mlrd_ptys_rsvd5[8];
+	bits32_t	mlrd_ptys_ext_proto_oper;
 	bits32_t	mlrd_ptys_proto_oper;
 	uint8_t		mlrd_ptys_rsvd6[8];
 	bits32_t	mlrd_ptys_proto_partner_advert;

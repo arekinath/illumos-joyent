@@ -45,36 +45,27 @@ static char *mlxcx_priv_props[] = {
 static uint64_t
 mlxcx_speed_to_bits(mlxcx_eth_proto_t v)
 {
-	switch (v) {
-	case MLXCX_PROTO_SGMII_100BASE:
+	switch (mlxcx_get_eth_speed(&v)) {
+	case MLXCX_SPEED_100M:
 		return (100ULL * MBITS);
-	case MLXCX_PROTO_SGMII:
-	case MLXCX_PROTO_1000BASE_KX:
+	case MLXCX_SPEED_1G:
 		return (1000ULL * MBITS);
-	case MLXCX_PROTO_10GBASE_CX4:
-	case MLXCX_PROTO_10GBASE_KX4:
-	case MLXCX_PROTO_10GBASE_KR:
-	case MLXCX_PROTO_10GBASE_CR:
-	case MLXCX_PROTO_10GBASE_SR:
-	case MLXCX_PROTO_10GBASE_ER_LR:
+	case MLXCX_SPEED_5G:
+		return (5ULL * GBITS);
+	case MLXCX_SPEED_10G:
 		return (10ULL * GBITS);
-	case MLXCX_PROTO_40GBASE_CR4:
-	case MLXCX_PROTO_40GBASE_KR4:
-	case MLXCX_PROTO_40GBASE_SR4:
-	case MLXCX_PROTO_40GBASE_LR4_ER4:
-		return (40ULL * GBITS);
-	case MLXCX_PROTO_25GBASE_CR:
-	case MLXCX_PROTO_25GBASE_KR:
-	case MLXCX_PROTO_25GBASE_SR:
+	case MLXCX_SPEED_25G:
 		return (25ULL * GBITS);
-	case MLXCX_PROTO_50GBASE_SR2:
-	case MLXCX_PROTO_50GBASE_CR2:
-	case MLXCX_PROTO_50GBASE_KR2:
+	case MLXCX_SPEED_40G:
+		return (40ULL * GBITS);
+	case MLXCX_SPEED_50G:
 		return (50ULL * GBITS);
-	case MLXCX_PROTO_100GBASE_CR4:
-	case MLXCX_PROTO_100GBASE_SR4:
-	case MLXCX_PROTO_100GBASE_KR4:
+	case MLXCX_SPEED_100G:
 		return (100ULL * GBITS);
+	case MLXCX_SPEED_200G:
+		return (200ULL * GBITS);
+	case MLXCX_SPEED_400G:
+		return (400ULL * GBITS);
 	default:
 		return (0);
 	}
@@ -1151,44 +1142,44 @@ mlxcx_mac_propinfo(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 	case MAC_PROP_ADV_100GFDX_CAP:
 	case MAC_PROP_EN_100GFDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_100G) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_100G));
 		break;
 	case MAC_PROP_ADV_50GFDX_CAP:
 	case MAC_PROP_EN_50GFDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_50G) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_50G));
 		break;
 	case MAC_PROP_ADV_40GFDX_CAP:
 	case MAC_PROP_EN_40GFDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_40G) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_40G));
 		break;
 	case MAC_PROP_ADV_25GFDX_CAP:
 	case MAC_PROP_EN_25GFDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_25G) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_25G));
 		break;
 	case MAC_PROP_ADV_10GFDX_CAP:
 	case MAC_PROP_EN_10GFDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_10G) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_10G));
 		break;
 	case MAC_PROP_ADV_1000FDX_CAP:
 	case MAC_PROP_EN_1000FDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_1G) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_1G));
 		break;
 	case MAC_PROP_ADV_100FDX_CAP:
 	case MAC_PROP_EN_100FDX_CAP:
 		mac_prop_info_set_perm(prh, MAC_PROP_PERM_READ);
-		mac_prop_info_set_default_uint8(prh,
-		    (port->mlp_oper_proto & MLXCX_PROTO_100M) != 0);
+		mac_prop_info_set_default_uint8(prh, mlxcx_test_eth_speed(
+		    &port->mlp_oper_proto, MLXCX_SPEED_100M));
 		break;
 	default:
 		break;
@@ -1394,8 +1385,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_100G) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_100G);
 		break;
 	case MAC_PROP_ADV_50GFDX_CAP:
 	case MAC_PROP_EN_50GFDX_CAP:
@@ -1403,8 +1394,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_50G) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_50G);
 		break;
 	case MAC_PROP_ADV_40GFDX_CAP:
 	case MAC_PROP_EN_40GFDX_CAP:
@@ -1412,8 +1403,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_40G) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_40G);
 		break;
 	case MAC_PROP_ADV_25GFDX_CAP:
 	case MAC_PROP_EN_25GFDX_CAP:
@@ -1421,8 +1412,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_25G) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_25G);
 		break;
 	case MAC_PROP_ADV_10GFDX_CAP:
 	case MAC_PROP_EN_10GFDX_CAP:
@@ -1430,8 +1421,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_10G) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_10G);
 		break;
 	case MAC_PROP_ADV_1000FDX_CAP:
 	case MAC_PROP_EN_1000FDX_CAP:
@@ -1439,8 +1430,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_1G) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_1G);
 		break;
 	case MAC_PROP_ADV_100FDX_CAP:
 	case MAC_PROP_EN_100FDX_CAP:
@@ -1448,8 +1439,8 @@ mlxcx_mac_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			ret = EOVERFLOW;
 			break;
 		}
-		*(uint8_t *)pr_val = (port->mlp_max_proto &
-		    MLXCX_PROTO_100M) != 0;
+		*(uint8_t *)pr_val = mlxcx_test_eth_speed(
+		    &port->mlp_max_proto, MLXCX_SPEED_100M);
 		break;
 	default:
 		ret = ENOTSUP;

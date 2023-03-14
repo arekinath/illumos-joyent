@@ -1923,12 +1923,18 @@ mlxcx_cmd_query_port_speed(mlxcx_t *mlxp, mlxcx_port_t *mlp)
 		} else {
 			mlp->mlp_autoneg = B_TRUE;
 		}
-		mlp->mlp_max_proto =
-		    from_bits32(data.mlrd_ptys.mlrd_ptys_proto_cap);
-		mlp->mlp_admin_proto =
-		    from_bits32(data.mlrd_ptys.mlrd_ptys_proto_admin);
-		mlp->mlp_oper_proto =
-		    from_bits32(data.mlrd_ptys.mlrd_ptys_proto_oper);
+		mlp->mlp_max_proto = (mlxcx_eth_proto_t){
+		    .mep_base = data.mlrd_ptys.mlrd_ptys_proto_cap,
+		    .mep_ext = data.mlrd_ptys.mlrd_ptys_ext_proto_cap
+		};
+		mlp->mlp_admin_proto = (mlxcx_eth_proto_t){
+		    .mep_base = data.mlrd_ptys.mlrd_ptys_proto_admin,
+		    .mep_ext = data.mlrd_ptys.mlrd_ptys_ext_proto_admin
+		};
+		mlp->mlp_oper_proto = (mlxcx_eth_proto_t){
+		    .mep_base = data.mlrd_ptys.mlrd_ptys_proto_oper,
+		    .mep_ext = data.mlrd_ptys.mlrd_ptys_ext_proto_oper
+		};
 	}
 
 	return (ret);
