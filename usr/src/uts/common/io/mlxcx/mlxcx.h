@@ -622,14 +622,15 @@ typedef struct mlxcx_completion_queue {
 } mlxcx_completion_queue_t;
 
 typedef enum {
-	MLXCX_WQ_ALLOC		= 1 << 0,
-	MLXCX_WQ_CREATED	= 1 << 1,
-	MLXCX_WQ_STARTED	= 1 << 2,
-	MLXCX_WQ_DESTROYED	= 1 << 3,
-	MLXCX_WQ_TEARDOWN	= 1 << 4,
-	MLXCX_WQ_BUFFERS	= 1 << 5,
-	MLXCX_WQ_REFILLING	= 1 << 6,
-	MLXCX_WQ_BLOCKED_MAC	= 1 << 7
+	MLXCX_WQ_INIT		= 1 << 0,
+	MLXCX_WQ_ALLOC		= 1 << 1,
+	MLXCX_WQ_CREATED	= 1 << 2,
+	MLXCX_WQ_STARTED	= 1 << 3,
+	MLXCX_WQ_DESTROYED	= 1 << 4,
+	MLXCX_WQ_TEARDOWN	= 1 << 5,
+	MLXCX_WQ_BUFFERS	= 1 << 6,
+	MLXCX_WQ_REFILLING	= 1 << 7,
+	MLXCX_WQ_BLOCKED_MAC	= 1 << 8
 } mlxcx_workq_state_t;
 
 typedef enum {
@@ -1341,11 +1342,20 @@ extern boolean_t mlxcx_rq_add_buffer(mlxcx_t *, mlxcx_work_queue_t *,
 extern boolean_t mlxcx_rq_add_buffers(mlxcx_t *, mlxcx_work_queue_t *,
     mlxcx_buffer_t **, size_t);
 extern boolean_t mlxcx_sq_add_buffer(mlxcx_t *, mlxcx_work_queue_t *,
-    uint8_t *, size_t, uint32_t, mlxcx_buffer_t *);
+    mlxcx_buffer_t *);
 extern boolean_t mlxcx_sq_add_nop(mlxcx_t *, mlxcx_work_queue_t *);
 extern void mlxcx_rq_refill(mlxcx_t *, mlxcx_work_queue_t *);
-extern void mlxcx_buf_prepare_sqe(mlxcx_t *, mlxcx_work_queue_t *,
-    mlxcx_buffer_t *, uint8_t *, size_t, uint32_t);
+
+typedef struct mlxcx_tx_ctx {
+	uint8_t		mtc_inline_hdrs[MLXCX_MAX_INLINE_HEADERLEN];
+	size_t		mtc_inline_hdrlen;
+	uint32_t	mtc_chkflags;
+	uint32_t	mtc_mss;
+	uint32_t	mtc_lsoflags;
+} mlxcx_tx_ctx_t;
+
+extern boolean_t mlxcx_buf_prepare_sqe(mlxcx_t *, mlxcx_work_queue_t *,
+    mlxcx_buffer_t *, const mlxcx_tx_ctx_t *);
 
 extern void mlxcx_teardown_groups(mlxcx_t *);
 extern void mlxcx_wq_teardown(mlxcx_t *, mlxcx_work_queue_t *);
