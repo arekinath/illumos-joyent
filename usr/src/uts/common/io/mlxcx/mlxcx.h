@@ -318,12 +318,7 @@ typedef struct mlxcx_cmd_queue {
 	uint8_t			mcmd_size_l2;
 	uint8_t			mcmd_stride_l2;
 	uint_t			mcmd_size;
-	/*
-	 * The mask has a bit for each command slot, there are a maximum
-	 * of 32 slots. When the bit is set in the mask, it indicates
-	 * the slot is available.
-	 */
-	uint32_t		mcmd_mask;
+	uint8_t			mcmd_next;	/* next command slot */
 
 	mlxcx_cmd_t		*mcmd_active[MLXCX_CMD_MAX];
 
@@ -950,8 +945,11 @@ struct mlxcx_ring_group {
 };
 
 typedef enum mlxcx_cmd_state {
-	MLXCX_CMD_S_DONE	= 1 << 0,
-	MLXCX_CMD_S_ERROR	= 1 << 1
+	MLXCX_CMD_S_INIT	= 0,
+	MLXCX_CMD_S_SUBMITTED,
+	MLXCX_CMD_S_POLLING,
+	MLXCX_CMD_S_DONE,
+	MLXCX_CMD_S_ERROR
 } mlxcx_cmd_state_t;
 
 struct mlxcx_cmd {

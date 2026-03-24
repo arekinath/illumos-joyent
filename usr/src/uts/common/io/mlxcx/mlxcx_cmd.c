@@ -569,7 +569,7 @@ mlxcx_cmd_queue_init(mlxcx_t *mlxp)
 		return (B_FALSE);
 	}
 
-	cmd->mcmd_mask = (uint32_t)((1ULL << cmd->mcmd_size) - 1);
+	cmd->mcmd_next = 0;
 
 	mutex_init(&cmd->mcmd_lock, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&cmd->mcmd_cv, NULL, CV_DRIVER, NULL);
@@ -840,33 +840,34 @@ mlxcx_cmd_copy_output(mlxcx_cmd_ent_t *ent, mlxcx_cmd_t *cmd)
 }
 
 static uint_t
-mlxcx_cmd_reserve_slot(mlxcx_cmd_queue_t *cmdq)
+mlxcx_cmd_reserve_slot(mlxcx_cmd_queue_t *cmdq, mlxcx_cmd_t *cmd)
 {
-	uint_t slot;
-
-	mutex_enter(&cmdq->mcmd_lock);
-	slot = ddi_ffs(cmdq->mcmd_mask);
-	while (slot == 0) {
+	uint_t i, slot;
+	ASSERT(mutex_owned(&cmdq->mcmd_lock));
+	ASSERT(mutex_owned(&cmd->mlcmd_lock));
+	while (1) {
+		for (i = 0; i < MLXCX_CMD_MAX; ++i) {
+			slot = (cmdq->mcmd_next + i) % MLXCX_CMD_MAX;
+			if (cmdq->mcmd_active[slot] == NULL)
+				break;
+		}
+		if (cmdq->mcmd_active[slot] == NULL) {
+			cmdq->mcmd_active[slot] = cmd;
+			cmdq->mcmd_next = slot + 1;
+			return (slot);
+		}
 		cv_wait(&cmdq->mcmd_cv, &cmdq->mcmd_lock);
-		slot = ddi_ffs(cmdq->mcmd_mask);
 	}
-
-	cmdq->mcmd_mask &= ~(1U << --slot);
-
-	ASSERT3P(cmdq->mcmd_active[slot], ==, NULL);
-
-	mutex_exit(&cmdq->mcmd_lock);
-
-	return (slot);
 }
 
 static void
-mlxcx_cmd_release_slot(mlxcx_cmd_queue_t *cmdq, uint_t slot)
+mlxcx_cmd_release_slot(mlxcx_cmd_queue_t *cmdq, uint_t slot, mlxcx_cmd_t *cmd)
 {
-	mutex_enter(&cmdq->mcmd_lock);
-	cmdq->mcmd_mask |= 1U << slot;
+	ASSERT(mutex_owned(&cmd->mlcmd_lock));
+	ASSERT(mutex_owned(&cmdq->mcmd_lock));
+	ASSERT3P(cmdq->mcmd_active[slot], ==, cmd);
+	cmdq->mcmd_active[slot] = NULL;
 	cv_broadcast(&cmdq->mcmd_cv);
-	mutex_exit(&cmdq->mcmd_lock);
 }
 
 static void
@@ -875,6 +876,10 @@ mlxcx_cmd_done(mlxcx_cmd_t *cmd, uint_t slot)
 	mlxcx_t *mlxp = cmd->mlcmd_mlxp;
 	mlxcx_cmd_queue_t *cmdq = &mlxp->mlx_cmd;
 	mlxcx_cmd_ent_t *ent;
+
+	ASSERT(mutex_owned(&cmd->mlcmd_lock));
+	ASSERT3S(cmd->mlcmd_state, >=, MLXCX_CMD_S_SUBMITTED);
+	ASSERT3S(cmd->mlcmd_state, <, MLXCX_CMD_S_DONE);
 
 	/*
 	 * Command is done. Save relevant data. Once we broadcast on the CV and
@@ -885,17 +890,74 @@ mlxcx_cmd_done(mlxcx_cmd_t *cmd, uint_t slot)
 	ent = (mlxcx_cmd_ent_t *)(cmdq->mcmd_dma.mxdb_va +
 	    (slot << cmdq->mcmd_stride_l2));
 
-	mutex_enter(&cmd->mlcmd_lock);
 	cmd->mlcmd_status = MLXCX_CMD_STATUS(ent->mce_status);
 	if (cmd->mlcmd_status == 0)
 		mlxcx_cmd_copy_output(ent, cmd);
 
 	cmd->mlcmd_state = MLXCX_CMD_S_DONE;
 	cv_broadcast(&cmd->mlcmd_cv);
-	mutex_exit(&cmd->mlcmd_lock);
 
-	cmdq->mcmd_active[slot] = NULL;
-	mlxcx_cmd_release_slot(cmdq, slot);
+	mlxcx_cmd_release_slot(cmdq, slot, cmd);
+}
+
+static void
+mlxcx_submit_cmd_common(mlxcx_t *mlxp, mlxcx_cmd_t *cmd, uint_t *pslot,
+    mlxcx_cmd_ent_t **pent)
+{
+	mlxcx_cmd_queue_t *cmdq = &mlxp->mlx_cmd;
+	mlxcx_cmd_ent_t *ent;
+	uint_t poll, slot;
+
+	ASSERT(mutex_owned(&cmdq->mcmd_lock));
+	ASSERT(mutex_owned(&cmd->mlcmd_lock));
+
+	VERIFY3S(cmd->mlcmd_state, ==, MLXCX_CMD_S_INIT);
+	VERIFY3S(cmd->mlcmd_op, !=, 0);
+
+	slot = mlxcx_cmd_reserve_slot(cmdq, cmd);
+	ent = (mlxcx_cmd_ent_t *)(cmdq->mcmd_dma.mxdb_va +
+	    (slot << cmdq->mcmd_stride_l2));
+
+	bzero(ent, sizeof (*ent));
+	ent->mce_type = MLXCX_CMD_TRANSPORT_PCI;
+	ent->mce_in_length = to_be32(cmd->mlcmd_inlen);
+	ent->mce_out_length = to_be32(cmd->mlcmd_outlen);
+	ent->mce_token = cmd->mlcmd_token;
+	ent->mce_sig = 0;
+	mlxcx_cmd_prep_input(ent, cmd);
+	mlxcx_cmd_prep_output(ent, cmd);
+
+	cmd->mlcmd_state = MLXCX_CMD_S_SUBMITTED;
+
+	/*
+	 * Ensure all of the other fields of the entry are written before
+	 * we switch the owner to hardware (the device might start executing
+	 * right away)
+	 */
+	membar_producer();
+	ent->mce_status = MLXCX_CMD_HW_OWNED;
+
+	MLXCX_DMA_SYNC(cmdq->mcmd_dma, DDI_DMA_SYNC_FORDEV);
+
+	mlxcx_put32(mlxp, MLXCX_ISS_CMD_DOORBELL, 1 << slot);
+
+	if (pslot)
+		*pslot = slot;
+	if (pent)
+		*pent = ent;
+}
+
+static void
+mlxcx_submit_cmd(mlxcx_t *mlxp, mlxcx_cmd_t *cmd)
+{
+	mlxcx_cmd_queue_t *cmdq = &mlxp->mlx_cmd;
+	VERIFY0(cmd->mlcmd_poll);
+
+	mutex_enter(&cmdq->mcmd_lock);
+	mutex_enter(&cmd->mlcmd_lock);
+	mlxcx_submit_cmd_common(mlxp, cmd, NULL, NULL);
+	mutex_exit(&cmd->mlcmd_lock);
+	mutex_exit(&cmdq->mcmd_lock);
 }
 
 static void
@@ -907,32 +969,15 @@ mlxcx_cmd_taskq(void *arg)
 	mlxcx_cmd_ent_t *ent;
 	uint_t poll, slot;
 
-	ASSERT3S(cmd->mlcmd_op, !=, 0);
+	VERIFY3S(cmd->mlcmd_op, !=, 0);
+	VERIFY(cmd->mlcmd_poll);
 
-	slot = mlxcx_cmd_reserve_slot(cmdq);
-	ent = (mlxcx_cmd_ent_t *)(cmdq->mcmd_dma.mxdb_va +
-	    (slot << cmdq->mcmd_stride_l2));
+	mutex_enter(&cmdq->mcmd_lock);
+	mutex_enter(&cmd->mlcmd_lock);
 
-	cmdq->mcmd_active[slot] = cmd;
+	mlxcx_submit_cmd_common(mlxp, cmd, &slot, &ent);
 
-	/*
-	 * Command queue is currently ours as we set busy.
-	 */
-	bzero(ent, sizeof (*ent));
-	ent->mce_type = MLXCX_CMD_TRANSPORT_PCI;
-	ent->mce_in_length = to_be32(cmd->mlcmd_inlen);
-	ent->mce_out_length = to_be32(cmd->mlcmd_outlen);
-	ent->mce_token = cmd->mlcmd_token;
-	ent->mce_sig = 0;
-	ent->mce_status = MLXCX_CMD_HW_OWNED;
-	mlxcx_cmd_prep_input(ent, cmd);
-	mlxcx_cmd_prep_output(ent, cmd);
-	MLXCX_DMA_SYNC(cmdq->mcmd_dma, DDI_DMA_SYNC_FORDEV);
-
-	mlxcx_put32(mlxp, MLXCX_ISS_CMD_DOORBELL, 1 << slot);
-
-	if (!cmd->mlcmd_poll)
-		return;
+	cmd->mlcmd_state = MLXCX_CMD_S_POLLING;
 
 	for (poll = 0; poll < mlxcx_cmd_tries; poll++) {
 		delay(drv_usectohz(mlxcx_cmd_delay));
@@ -947,21 +992,23 @@ mlxcx_cmd_taskq(void *arg)
 	 */
 
 	if (poll == mlxcx_cmd_tries) {
-		mutex_enter(&cmd->mlcmd_lock);
 		cmd->mlcmd_status = MLXCX_CMD_R_TIMEOUT;
 		cmd->mlcmd_state = MLXCX_CMD_S_ERROR;
 		cv_broadcast(&cmd->mlcmd_cv);
+
+		mlxcx_cmd_release_slot(cmdq, slot, cmd);
+
 		mutex_exit(&cmd->mlcmd_lock);
+		mutex_exit(&cmdq->mcmd_lock);
 
 		mlxcx_fm_ereport(mlxp, DDI_FM_DEVICE_NO_RESPONSE);
-
-		cmdq->mcmd_active[slot] = NULL;
-		mlxcx_cmd_release_slot(cmdq, slot);
 
 		return;
 	}
 
 	mlxcx_cmd_done(cmd, slot);
+	mutex_exit(&cmd->mlcmd_lock);
+	mutex_exit(&cmdq->mcmd_lock);
 }
 
 void
@@ -979,11 +1026,28 @@ mlxcx_cmd_completion(mlxcx_t *mlxp, mlxcx_eventq_ent_t *ent)
 	while ((slot = ddi_ffs(comp_vec)) != 0) {
 		comp_vec &= ~(1U << --slot);
 
-		cmd = cmdq->mcmd_active[slot];
-		if (cmd->mlcmd_poll)
-			continue;
+		mutex_enter(&cmdq->mcmd_lock);
 
+		cmd = cmdq->mcmd_active[slot];
+		/*
+		 * If there are still some polled commands left on the ring
+		 * when the EQ was enabled, we might get completions for them
+		 * here and race against the taskq polling them. The taskq might
+		 * have already completed the command (in which case
+		 * active[slot] will be NULL), or it might be about to do that,
+		 * and we need to let it do its thing.
+		 */
+		if (cmd == NULL || cmd->mlcmd_poll) {
+			mutex_exit(&cmdq->mcmd_lock);
+			continue;
+		}
+
+		mutex_enter(&cmd->mlcmd_lock);
+		ASSERT3S(cmd->mlcmd_state, ==, MLXCX_CMD_S_SUBMITTED);
 		mlxcx_cmd_done(cmd, slot);
+		mutex_exit(&cmd->mlcmd_lock);;
+
+		mutex_exit(&cmdq->mcmd_lock);
 	}
 }
 
@@ -991,6 +1055,8 @@ static boolean_t
 mlxcx_cmd_send(mlxcx_t *mlxp, mlxcx_cmd_t *cmd, const void *in, uint32_t inlen,
     void *out, uint32_t outlen)
 {
+	VERIFY3S(cmd->mlcmd_state, ==, MLXCX_CMD_S_INIT);
+
 	if (inlen > MLXCX_CMD_INLINE_INPUT_LEN) {
 		uint32_t need = inlen - MLXCX_CMD_INLINE_INPUT_LEN;
 		uint8_t nblocks;
@@ -1037,16 +1103,24 @@ mlxcx_cmd_send(mlxcx_t *mlxp, mlxcx_cmd_t *cmd, const void *in, uint32_t inlen,
 	cmd->mlcmd_mlxp = mlxp;
 
 	/*
-	 * Now that all allocations have been done, all that remains is for us
-	 * to dispatch the request to process this to the taskq for it to be
-	 * processed.
+	 * If we're in polling mode (async EQ isn't up yet), delegate the
+	 * work of submitting one command at a time and polling the ring to
+	 * the mcmd_taskq.
 	 */
-	if (ddi_taskq_dispatch(mlxp->mlx_cmd.mcmd_taskq, mlxcx_cmd_taskq, cmd,
-	    DDI_SLEEP) != DDI_SUCCESS) {
-		mlxcx_warn(mlxp, "failed to submit command to taskq");
-		return (B_FALSE);
+	if (cmd->mlcmd_poll) {
+		if (ddi_taskq_dispatch(mlxp->mlx_cmd.mcmd_taskq,
+		    mlxcx_cmd_taskq, cmd, DDI_SLEEP) != DDI_SUCCESS) {
+			mlxcx_warn(mlxp, "failed to submit command to taskq");
+			return (B_FALSE);
+		}
+		return (B_TRUE);
 	}
 
+	/*
+	 * Otherwise just submit it directly here, and the EQ handler will
+	 * complete it when it's done.
+	 */
+	mlxcx_submit_cmd(mlxp, cmd);
 	return (B_TRUE);
 }
 
@@ -1054,7 +1128,7 @@ static void
 mlxcx_cmd_wait(mlxcx_cmd_t *cmd)
 {
 	mutex_enter(&cmd->mlcmd_lock);
-	while (cmd->mlcmd_state == 0) {
+	while (cmd->mlcmd_state < MLXCX_CMD_S_DONE) {
 		cv_wait(&cmd->mlcmd_cv, &cmd->mlcmd_lock);
 	}
 	mutex_exit(&cmd->mlcmd_lock);
@@ -1065,7 +1139,9 @@ mlxcx_cmd_evaluate(mlxcx_t *mlxp, mlxcx_cmd_t *cmd)
 {
 	mlxcx_cmd_out_t *out;
 
-	if ((cmd->mlcmd_state & MLXCX_CMD_S_ERROR) != 0) {
+	ASSERT3S(cmd->mlcmd_state, >=, MLXCX_CMD_S_DONE);
+
+	if (cmd->mlcmd_state == MLXCX_CMD_S_ERROR) {
 		mlxcx_warn(mlxp, "command %s (0x%x) failed due to an internal "
 		    "driver error",
 		    mlxcx_cmd_opcode_string(cmd->mlcmd_op),
